@@ -1,0 +1,7 @@
+{
+    "name": "WoodFraming",
+    "description": "Wood framing automation for Autodesk Revit - walls, floors, ceilings, roofs",
+    "author": "Roi Hason @ Swich Design",
+    "version": "0.3.2",
+    "type": "extension"
+}

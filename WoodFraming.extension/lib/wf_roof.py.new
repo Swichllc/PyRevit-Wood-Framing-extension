@@ -1,0 +1,672 @@
+# -*- coding: utf-8 -*-
+"""Roof framing engine -- stick-frame rafters and truss placement.
+
+Supports gable, hip, shed/mono-slope, dutch-gable, and flat roofs.
+
+Stick-frame construction sequence:
+  1. Ridge board(s)
+  2. Common rafters at OC spacing along each slope
+  3. Collar ties connecting opposing rafter pairs (gable)
+  4. Ceiling joists -- horizontal members eave-to-eave at OC spacing
+  5. Fascia / sub-fascia boards along eave edges
+  6. Kickers / outriggers -- short diagonal braces from rafter to joist
+
+Truss placement:
+  Place a user-selected truss family at OC spacing perpendicular to ridge.
+"""
+
+import math
+
+from wf_geometry import FramingMember, inches_to_feet
+from wf_host import analyze_roof_host, PlanarHostInfo
+from wf_placement import BaseFramingEngine
+
+
+MIN_MEMBER_LENGTH = inches_to_feet(1.0)
+RIDGE_TOL = inches_to_feet(3.0)
+EDGE_TOL = inches_to_feet(1.0)
+COLLAR_TIE_FRACTION = 1.0 / 3.0
+PLATE_THICKNESS = inches_to_feet(1.5)
+KICKER_FRACTION = 0.25  # kicker attaches at 1/4 of rafter from eave
+
+# Only faces within ~1 degree of horizontal are considered flat.
+FLAT_THRESHOLD = 0.9998
+
+
+# ======================================================================
+#  Helpers
+# ======================================================================
+
+def _classify_roof(planes):
+    """Classify roof shape from its analyzed planes."""
+    if not planes:
+        return "flat"
+    sloped = [p for p in planes if p.normal.Z < FLAT_THRESHOLD]
+    flat_p = [p for p in planes if p.normal.Z >= FLAT_THRESHOLD]
+    if not sloped:
+        return "flat"
+    if len(sloped) == 1:
+        return "shed"
+    if len(sloped) == 2 and not flat_p:
+        return "gable"
+    if len(sloped) == 4 and not flat_p:
+        return "hip"
+    if len(sloped) >= 2 and flat_p:
+        return "dutch"
+    return "complex"
+
+
+def _pt_key(pt, decimals=4):
+    return (round(pt.X, decimals), round(pt.Y, decimals),
+            round(pt.Z, decimals))
+
+
+def _dist(a, b):
+    return a.DistanceTo(b)
+
+
+def _normalize(v):
+    l = v.GetLength()
+    if l < 1e-9:
+        return None
+    return v.Multiply(1.0 / l)
+
+
+def _midpoint(a, b):
+    from Autodesk.Revit.DB import XYZ
+    return XYZ((a.X + b.X) / 2.0, (a.Y + b.Y) / 2.0, (a.Z + b.Z) / 2.0)
+
+
+def _lerp(a, b, t):
+    """Linear interpolation between two XYZ points."""
+    from Autodesk.Revit.DB import XYZ
+    return XYZ(
+        a.X + t * (b.X - a.X),
+        a.Y + t * (b.Y - a.Y),
+        a.Z + t * (b.Z - a.Z),
+    )
+
+
+# ======================================================================
+#  Ridge / eave detection
+# ======================================================================
+
+def _surface_point(plane, lx, ly):
+    """World point on the face surface -- NO depth offset."""
+    return (plane.origin
+            + plane.x_axis.Multiply(lx)
+            + plane.y_axis.Multiply(ly))
+
+
+def _find_ridge_edges(planes):
+    """Find ridge edges -- shared boundary between two sloped faces.
+
+    Returns list of (start_xyz, end_xyz, plane_a, plane_b).
+    """
+    sloped = [p for p in planes if p.normal.Z < FLAT_THRESHOLD]
+    if len(sloped) < 2:
+        return []
+
+    all_edges = []
+    for plane in sloped:
+        for loop in plane.boundary_loops_local:
+            count = len(loop)
+            for i in range(count):
+                s_local = loop[i]
+                e_local = loop[(i + 1) % count]
+                s_world = _surface_point(plane, s_local[0], s_local[1])
+                e_world = _surface_point(plane, e_local[0], e_local[1])
+                all_edges.append((s_world, e_world, plane))
+
+    ridges = []
+    used = set()
+    for i in range(len(all_edges)):
+        if i in used:
+            continue
+        s1, e1, p1 = all_edges[i]
+        for j in range(i + 1, len(all_edges)):
+            if j in used:
+                continue
+            s2, e2, p2 = all_edges[j]
+            if p1 is p2:
+                continue
+            match = False
+            if _dist(s1, s2) < EDGE_TOL and _dist(e1, e2) < EDGE_TOL:
+                match = True
+            elif _dist(s1, e2) < EDGE_TOL and _dist(e1, s2) < EDGE_TOL:
+                match = True
+            if match:
+                avg_z = (s1.Z + e1.Z) / 2.0
+                ridges.append((s1, e1, p1, p2, avg_z))
+                used.add(i)
+                used.add(j)
+                break
+
+    if not ridges:
+        return []
+
+    max_z = max(r[4] for r in ridges)
+    return [(s, e, pa, pb) for s, e, pa, pb, z in ridges
+            if z >= max_z - RIDGE_TOL]
+
+
+def _find_eave_edges(plane, ridge_edges):
+    """Find eave edges of a plane (non-ridge boundary edges)."""
+    ridge_set = set()
+    for rs, re, pa, pb in ridge_edges:
+        ridge_set.add((_pt_key(rs), _pt_key(re)))
+        ridge_set.add((_pt_key(re), _pt_key(rs)))
+
+    eaves = []
+    for loop in plane.boundary_loops_local:
+        count = len(loop)
+        for i in range(count):
+            s_local = loop[i]
+            e_local = loop[(i + 1) % count]
+            s_world = _surface_point(plane, s_local[0], s_local[1])
+            e_world = _surface_point(plane, e_local[0], e_local[1])
+            sk = _pt_key(s_world)
+            ek = _pt_key(e_world)
+            if (sk, ek) not in ridge_set:
+                eaves.append((s_world, e_world))
+    return eaves
+
+
+def _lowest_eave_z(eave_edges):
+    """Return the lowest Z among all eave edge endpoints."""
+    if not eave_edges:
+        return None
+    z_vals = []
+    for s, e in eave_edges:
+        z_vals.append(s.Z)
+        z_vals.append(e.Z)
+    return min(z_vals) if z_vals else None
+
+
+def _rafter_positions(eave_start, eave_end, spacing):
+    """Generate OC positions along an eave edge."""
+    edge_len = _dist(eave_start, eave_end)
+    if edge_len < MIN_MEMBER_LENGTH or spacing <= 0:
+        return []
+    positions = []
+    d = 0.0
+    while d <= edge_len + 1e-9:
+        t = min(d / edge_len, 1.0)
+        positions.append(t)
+        d += spacing
+    if abs(positions[-1] - 1.0) > 1e-6:
+        positions.append(1.0)
+    return positions
+
+
+def _project_to_ridge(pt, ridge_start, ridge_end):
+    """Project a point onto a ridge line."""
+    ridge_dir = ridge_end - ridge_start
+    ridge_len = ridge_dir.GetLength()
+    if ridge_len < 1e-9:
+        return ridge_start
+    ridge_dir = ridge_dir.Multiply(1.0 / ridge_len)
+    t = (pt - ridge_start).DotProduct(ridge_dir)
+    t = max(0.0, min(ridge_len, t))
+    return ridge_start + ridge_dir.Multiply(t)
+
+
+# ======================================================================
+#  Engine
+# ======================================================================
+
+class RoofFramingEngine(BaseFramingEngine):
+    """Calculates and places roof framing -- stick-frame or truss."""
+
+    def calculate_members(self, roof, mode="stick"):
+        """Calculate framing members for a roof.
+
+        Args:
+            roof: Revit RoofBase element.
+            mode: "stick" for rafter framing, "truss" for truss placement.
+
+        Returns:
+            (members_list, roof_info) or ([], None) on failure.
+        """
+        roof_info = analyze_roof_host(self.doc, roof, self.config)
+        if roof_info is None:
+            return [], None
+        if mode == "truss":
+            members = self._calc_truss_positions(roof_info)
+        else:
+            members = self._calc_stick_frame(roof_info)
+        return members, roof_info
+
+    # ------------------------------------------------------------------
+    #  Stick framing
+    # ------------------------------------------------------------------
+
+    def _calc_stick_frame(self, roof_info):
+        members = []
+        planes = roof_info.planes
+        roof_type = _classify_roof(planes)
+        spacing = self.config.stud_spacing_ft
+        if spacing <= 0:
+            return members
+
+        # 1. Try ridge detection (may fail on complex geometry)
+        try:
+            ridge_edges = _find_ridge_edges(planes)
+        except Exception:
+            ridge_edges = []
+
+        # Ridge boards
+        members.extend(self._make_ridge_boards(ridge_edges, roof_info))
+
+        # 2. Rafters per slope -- try ridge-based, fall back to scanline
+        all_eave_edges = []
+        for plane in planes:
+            if plane.normal.Z >= FLAT_THRESHOLD:
+                continue
+            rafters = []
+            if ridge_edges:
+                try:
+                    rafters = self._make_rafters_for_plane(
+                        plane, ridge_edges, roof_info)
+                except Exception:
+                    rafters = []
+            if not rafters:
+                rafters = self._make_rafters_scanline(
+                    plane, spacing, roof_info)
+            members.extend(rafters)
+
+            # Collect eave edges for fascia / ceiling joists
+            try:
+                eaves = _find_eave_edges(plane, ridge_edges)
+                all_eave_edges.extend(eaves)
+            except Exception:
+                pass
+
+        # 3. Collar ties (gable / dutch only)
+        if roof_type in ("gable", "dutch") and ridge_edges:
+            try:
+                members.extend(
+                    self._make_collar_ties(planes, ridge_edges, roof_info))
+            except Exception:
+                pass
+
+        # 4. Ceiling joists -- horizontal members at OC spacing
+        if ridge_edges and roof_type in ("gable", "dutch", "complex"):
+            try:
+                members.extend(
+                    self._make_ceiling_joists(
+                        planes, ridge_edges, roof_info, spacing))
+            except Exception:
+                pass
+
+        # 5. Fascia / sub-fascia along eave edges
+        try:
+            members.extend(
+                self._make_fascia(all_eave_edges, roof_info))
+        except Exception:
+            pass
+
+        return members
+
+    # ------------------------------------------------------------------
+    #  Ridge boards
+    # ------------------------------------------------------------------
+
+    def _make_ridge_boards(self, ridge_edges, roof_info):
+        members = []
+        seen = set()
+        for rs, re, pa, pb in ridge_edges:
+            if _dist(rs, re) < MIN_MEMBER_LENGTH:
+                continue
+            key = (_pt_key(rs), _pt_key(re))
+            rkey = (_pt_key(re), _pt_key(rs))
+            if key in seen or rkey in seen:
+                continue
+            seen.add(key)
+            m = FramingMember(FramingMember.HEADER, rs, re)
+            m.member_type = "RIDGE_BOARD"
+            m.family_name = (
+                self.config.header_family_name or self.config.stud_family_name)
+            m.type_name = (
+                self.config.header_type_name or self.config.stud_type_name)
+            m.rotation = 0.0
+            m.host_kind = roof_info.kind
+            m.host_id = roof_info.element_id
+            members.append(m)
+        return members
+
+    # ------------------------------------------------------------------
+    #  Rafters
+    # ------------------------------------------------------------------
+
+    def _make_rafters_for_plane(self, plane, ridge_edges, roof_info):
+        members = []
+        spacing = self.config.stud_spacing_ft
+        if spacing <= 0:
+            return members
+
+        eave_edges = _find_eave_edges(plane, ridge_edges)
+        if not eave_edges:
+            return self._make_rafters_scanline(plane, spacing, roof_info)
+
+        eave_edges.sort(key=lambda e: _dist(e[0], e[1]), reverse=True)
+        main_eave_s, main_eave_e = eave_edges[0]
+
+        plane_ridges = [(rs, re) for rs, re, pa, pb in ridge_edges
+                        if pa is plane or pb is plane]
+        if not plane_ridges:
+            return self._make_rafters_scanline(plane, spacing, roof_info)
+
+        ridge_s, ridge_e = plane_ridges[0]
+        eave_dir = main_eave_e - main_eave_s
+        eave_len = eave_dir.GetLength()
+        if eave_len < MIN_MEMBER_LENGTH:
+            return members
+        eave_dir = eave_dir.Multiply(1.0 / eave_len)
+
+        positions = _rafter_positions(main_eave_s, main_eave_e, spacing)
+        for t in positions:
+            eave_pt = main_eave_s + eave_dir.Multiply(t * eave_len)
+            ridge_pt = _project_to_ridge(eave_pt, ridge_s, ridge_e)
+            if _dist(eave_pt, ridge_pt) < MIN_MEMBER_LENGTH:
+                continue
+            m = FramingMember(FramingMember.STUD, eave_pt, ridge_pt)
+            m.member_type = "RAFTER"
+            m.family_name = self.config.stud_family_name
+            m.type_name = self.config.stud_type_name
+            m.rotation = 0.0
+            m.host_kind = plane.kind
+            m.host_id = plane.element_id
+            members.append(m)
+
+        if not members:
+            return self._make_rafters_scanline(plane, spacing, roof_info)
+        return members
+
+    def _make_rafters_scanline(self, plane, spacing, roof_info):
+        """Fallback for shed / flat roofs with no ridge."""
+        members = []
+        min_x, max_x, min_y, max_y = plane.bounds
+        if max_y - min_y < MIN_MEMBER_LENGTH:
+            return members
+        x = min_x
+        while x <= max_x + 1e-9:
+            intervals = plane.scanline_intervals("x", x)
+            for start_y, end_y in intervals:
+                if end_y - start_y < MIN_MEMBER_LENGTH:
+                    continue
+                s_pt = plane.point_at(x, start_y)
+                e_pt = plane.point_at(x, end_y)
+                m = FramingMember(FramingMember.STUD, s_pt, e_pt)
+                m.member_type = "RAFTER"
+                m.family_name = self.config.stud_family_name
+                m.type_name = self.config.stud_type_name
+                m.rotation = 0.0
+                m.host_kind = plane.kind
+                m.host_id = plane.element_id
+                members.append(m)
+            x += spacing
+        return members
+
+    # ------------------------------------------------------------------
+    #  Collar ties
+    # ------------------------------------------------------------------
+
+    def _make_collar_ties(self, planes, ridge_edges, roof_info):
+        """Collar ties at 1/3 rafter length from ridge, every other rafter."""
+        from Autodesk.Revit.DB import XYZ
+
+        members = []
+        if not ridge_edges:
+            return members
+
+        sloped = [p for p in planes if p.normal.Z < FLAT_THRESHOLD]
+        if len(sloped) < 2:
+            return members
+
+        spacing = self.config.stud_spacing_ft
+        if spacing <= 0:
+            return members
+
+        tie_spacing = spacing * 2.0
+        if spacing > 2.0:
+            tie_spacing = spacing
+
+        rs, re, pa, pb = ridge_edges[0]
+        ridge_dir = re - rs
+        ridge_len = ridge_dir.GetLength()
+        if ridge_len < MIN_MEMBER_LENGTH:
+            return members
+        ridge_unit = ridge_dir.Multiply(1.0 / ridge_len)
+
+        eave_a = _find_eave_edges(pa, ridge_edges)
+        eave_b = _find_eave_edges(pb, ridge_edges)
+        if not eave_a or not eave_b:
+            return members
+        eave_a.sort(key=lambda e: _dist(e[0], e[1]), reverse=True)
+        eave_b.sort(key=lambda e: _dist(e[0], e[1]), reverse=True)
+        ea_s, ea_e = eave_a[0]
+        eb_s, eb_e = eave_b[0]
+
+        d = tie_spacing / 2.0
+        while d < ridge_len:
+            ridge_pt = rs + ridge_unit.Multiply(d)
+            foot_a = _project_to_ridge(ridge_pt, ea_s, ea_e)
+            foot_b = _project_to_ridge(ridge_pt, eb_s, eb_e)
+
+            frac = COLLAR_TIE_FRACTION
+            tie_a = XYZ(
+                ridge_pt.X + frac * (foot_a.X - ridge_pt.X),
+                ridge_pt.Y + frac * (foot_a.Y - ridge_pt.Y),
+                ridge_pt.Z + frac * (foot_a.Z - ridge_pt.Z),
+            )
+            tie_b = XYZ(
+                ridge_pt.X + frac * (foot_b.X - ridge_pt.X),
+                ridge_pt.Y + frac * (foot_b.Y - ridge_pt.Y),
+                ridge_pt.Z + frac * (foot_b.Z - ridge_pt.Z),
+            )
+            tie_z = (tie_a.Z + tie_b.Z) / 2.0
+            tie_a = XYZ(tie_a.X, tie_a.Y, tie_z)
+            tie_b = XYZ(tie_b.X, tie_b.Y, tie_z)
+
+            if _dist(tie_a, tie_b) >= MIN_MEMBER_LENGTH:
+                m = FramingMember(FramingMember.HEADER, tie_a, tie_b)
+                m.member_type = "COLLAR_TIE"
+                m.family_name = self.config.stud_family_name
+                m.type_name = self.config.stud_type_name
+                m.rotation = -math.pi / 2.0  # flat
+                m.host_kind = roof_info.kind
+                m.host_id = roof_info.element_id
+                members.append(m)
+            d += tie_spacing
+
+        return members
+
+    # ------------------------------------------------------------------
+    #  Ceiling joists + kickers
+    # ------------------------------------------------------------------
+
+    def _make_ceiling_joists(self, planes, ridge_edges, roof_info, spacing):
+        """Ceiling joists spanning eave-to-eave at plate line elevation.
+
+        Also generates kicker/outrigger braces from each joist up to
+        the rafter at KICKER_FRACTION of rafter length from eave.
+        """
+        from Autodesk.Revit.DB import XYZ
+
+        members = []
+        if not ridge_edges:
+            return members
+
+        sloped = [p for p in planes if p.normal.Z < FLAT_THRESHOLD]
+        if len(sloped) < 2:
+            return members
+
+        rs, re, pa, pb = ridge_edges[0]
+        ridge_dir = re - rs
+        ridge_len = ridge_dir.GetLength()
+        if ridge_len < MIN_MEMBER_LENGTH:
+            return members
+        ridge_unit = ridge_dir.Multiply(1.0 / ridge_len)
+
+        eave_a = _find_eave_edges(pa, ridge_edges)
+        eave_b = _find_eave_edges(pb, ridge_edges)
+        if not eave_a or not eave_b:
+            return members
+        eave_a.sort(key=lambda e: _dist(e[0], e[1]), reverse=True)
+        eave_b.sort(key=lambda e: _dist(e[0], e[1]), reverse=True)
+        ea_s, ea_e = eave_a[0]
+        eb_s, eb_e = eave_b[0]
+
+        # Joist Z = lowest eave elevation (plate line)
+        eave_z = _lowest_eave_z(eave_a + eave_b)
+        if eave_z is None:
+            return members
+
+        d = 0.0
+        while d <= ridge_len + 1e-9:
+            ridge_pt = rs + ridge_unit.Multiply(min(d, ridge_len))
+            foot_a = _project_to_ridge(ridge_pt, ea_s, ea_e)
+            foot_b = _project_to_ridge(ridge_pt, eb_s, eb_e)
+
+            # Ceiling joist is horizontal at eave Z
+            joist_a = XYZ(foot_a.X, foot_a.Y, eave_z)
+            joist_b = XYZ(foot_b.X, foot_b.Y, eave_z)
+
+            if _dist(joist_a, joist_b) >= MIN_MEMBER_LENGTH:
+                m = FramingMember(FramingMember.HEADER, joist_a, joist_b)
+                m.member_type = "CEILING_JOIST"
+                m.family_name = self.config.stud_family_name
+                m.type_name = self.config.stud_type_name
+                m.rotation = -math.pi / 2.0  # flat
+                m.host_kind = roof_info.kind
+                m.host_id = roof_info.element_id
+                members.append(m)
+
+                # Kicker side A: diagonal from joist to rafter
+                rafter_pt_a = _lerp(foot_a, ridge_pt, KICKER_FRACTION)
+                kick_base_a = _lerp(joist_a, joist_b, KICKER_FRACTION)
+                if _dist(kick_base_a, rafter_pt_a) >= MIN_MEMBER_LENGTH:
+                    km = FramingMember(FramingMember.STUD,
+                                       kick_base_a, rafter_pt_a)
+                    km.member_type = "KICKER"
+                    km.family_name = self.config.stud_family_name
+                    km.type_name = self.config.stud_type_name
+                    km.rotation = 0.0
+                    km.host_kind = roof_info.kind
+                    km.host_id = roof_info.element_id
+                    members.append(km)
+
+                # Kicker side B
+                rafter_pt_b = _lerp(foot_b, ridge_pt, KICKER_FRACTION)
+                kick_base_b = _lerp(joist_b, joist_a, KICKER_FRACTION)
+                if _dist(kick_base_b, rafter_pt_b) >= MIN_MEMBER_LENGTH:
+                    km = FramingMember(FramingMember.STUD,
+                                       kick_base_b, rafter_pt_b)
+                    km.member_type = "KICKER"
+                    km.family_name = self.config.stud_family_name
+                    km.type_name = self.config.stud_type_name
+                    km.rotation = 0.0
+                    km.host_kind = roof_info.kind
+                    km.host_id = roof_info.element_id
+                    members.append(km)
+
+            d += spacing
+
+        return members
+
+    # ------------------------------------------------------------------
+    #  Fascia / sub-fascia
+    # ------------------------------------------------------------------
+
+    def _make_fascia(self, eave_edges, roof_info):
+        """Sub-fascia boards along each eave edge."""
+        members = []
+        seen = set()
+        for es, ee in eave_edges:
+            if _dist(es, ee) < MIN_MEMBER_LENGTH:
+                continue
+            key = (_pt_key(es), _pt_key(ee))
+            rkey = (_pt_key(ee), _pt_key(es))
+            if key in seen or rkey in seen:
+                continue
+            seen.add(key)
+            m = FramingMember(FramingMember.HEADER, es, ee)
+            m.member_type = "FASCIA"
+            m.family_name = (
+                self.config.header_family_name or self.config.stud_family_name)
+            m.type_name = (
+                self.config.header_type_name or self.config.stud_type_name)
+            m.rotation = 0.0
+            m.host_kind = roof_info.kind
+            m.host_id = roof_info.element_id
+            members.append(m)
+        return members
+
+    # ------------------------------------------------------------------
+    #  Truss placement
+    # ------------------------------------------------------------------
+
+    def _calc_truss_positions(self, roof_info):
+        """Place trusses at OC spacing perpendicular to ridge, eave-to-eave."""
+        from Autodesk.Revit.DB import XYZ
+
+        members = []
+        planes = roof_info.planes
+        spacing = self.config.stud_spacing_ft
+        if spacing <= 0:
+            return members
+
+        try:
+            ridge_edges = _find_ridge_edges(planes)
+        except Exception:
+            ridge_edges = []
+
+        sloped = [p for p in planes if p.normal.Z < FLAT_THRESHOLD]
+
+        if not ridge_edges:
+            if sloped:
+                return self._make_rafters_scanline(
+                    sloped[0], spacing, roof_info)
+            return members
+
+        rs, re, pa, pb = ridge_edges[0]
+        ridge_dir = re - rs
+        ridge_len = ridge_dir.GetLength()
+        if ridge_len < MIN_MEMBER_LENGTH:
+            return members
+        ridge_unit = ridge_dir.Multiply(1.0 / ridge_len)
+
+        eave_a = _find_eave_edges(pa, ridge_edges)
+        eave_b = _find_eave_edges(pb, ridge_edges)
+        if not eave_a and not eave_b:
+            return members
+        eave_a.sort(key=lambda e: _dist(e[0], e[1]), reverse=True)
+        eave_b.sort(key=lambda e: _dist(e[0], e[1]), reverse=True)
+
+        d = 0.0
+        while d <= ridge_len + 1e-9:
+            ridge_pt = rs + ridge_unit.Multiply(min(d, ridge_len))
+
+            foot_a = ridge_pt
+            if eave_a:
+                ea_s, ea_e = eave_a[0]
+                foot_a = _project_to_ridge(ridge_pt, ea_s, ea_e)
+
+            foot_b = ridge_pt
+            if eave_b:
+                eb_s, eb_e = eave_b[0]
+                foot_b = _project_to_ridge(ridge_pt, eb_s, eb_e)
+
+            if _dist(foot_a, foot_b) >= MIN_MEMBER_LENGTH:
+                m = FramingMember(FramingMember.STUD, foot_a, foot_b)
+                m.member_type = "TRUSS"
+                m.family_name = self.config.stud_family_name
+                m.type_name = self.config.stud_type_name
+                m.rotation = 0.0
+                m.host_kind = roof_info.kind
+                m.host_id = roof_info.element_id
+                members.append(m)
+            d += spacing
+
+        return members

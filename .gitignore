@@ -1,0 +1,34 @@
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+.pytest_cache/
+
+# Packaging
+build/
+dist/
+*.egg-info/
+
+# Editors
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# OS files
+.DS_Store
+Thumbs.db
+Desktop.ini
+
+# Revit and pyRevit backups
+*.rfa.bak
+*.rvt.bak
+*.slog
+*.tmp
+*.[0-9][0-9][0-9][0-9].rfa
+*.[0-9][0-9][0-9][0-9].rvt
+
+# Workspace-only content
+/Strategic Spatial Management and Environmental Design for Semi-Open Urban Infrastructure.md

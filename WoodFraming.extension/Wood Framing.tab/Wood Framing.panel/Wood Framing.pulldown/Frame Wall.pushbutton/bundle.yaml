@@ -1,0 +1,8 @@
+title: Frame Wall
+tooltip: >-
+  Select walls and automatically generate wood framing:
+  studs, plates, headers, sills, and cripple studs.
+author: Roi Hason @ Swich Design
+context:
+  any:
+    - OST_Walls
