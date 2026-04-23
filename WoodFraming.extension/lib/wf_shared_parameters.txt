@@ -1,0 +1,20 @@
+# This is a Revit shared parameter file.
+# Do not edit manually.
+*META	VERSION	MINVERSION
+META	2	1
+*GROUP	ID	NAME
+GROUP	1	WoodFraming
+*PARAM	GUID	NAME	DATATYPE	DATACATEGORY	GROUP	VISIBLE	DESCRIPTION	USERMODIFIABLE	HIDEWHENNOVALUE
+PARAM	569bf159-1854-475a-b236-7af05f81fb5e	WF_IsGenerated	YESNO		1	1	Tracks framing instances managed by the Wood Framing extension.	1	0
+PARAM	d108d3b6-10cb-4348-a817-77209a0f7f10	WF_HostKind	TEXT		1	1	Host category display name for grouped framing schedules.	1	1
+PARAM	72a28f2a-97de-4eb6-a345-de7322e04371	WF_HostId	TEXT		1	1	Stable host element id used to group framing schedule rows.	1	1
+PARAM	43b8d63e-5506-4447-9b97-10a48d5fd3ea	WF_HostLabel	TEXT		1	1	Preferred host label for schedules, using Mark when available.	1	1
+PARAM	3a57b3b9-a61f-40f7-9021-383fcbef2465	WF_MemberRole	TEXT		1	1	Normalized framing member role used by the BOM schedule.	1	1
+PARAM	54e36114-4a85-4112-9859-c86d302472ee	WF_MemberLength	LENGTH		1	1	Length used for BOM totals.	1	0
+PARAM	3a01f455-98f0-4800-893d-ff2ea7e5fd22	WF_SheathHostLabel	TEXT		1	1	Preferred host label for the sheathing schedule.	1	1
+PARAM	3412bf34-b6f9-40f7-92f8-5c6fdeaadf59	WF_SheathFullSheets	INTEGER		1	1	Count of full 4x8 sheathing sheets.	1	0
+PARAM	fe8357bf-0744-4121-befb-a07eed6a30fb	WF_SheathCutCount	INTEGER		1	1	Count of partial sheathing panels.	1	0
+PARAM	a8f17aa4-a225-423b-82da-2c2e672f7e66	WF_SheathCutArea	AREA		1	1	Total reusable partial-sheet area.	1	0
+PARAM	7ce6ae15-42a9-45ec-8806-a4dd77a3c087	WF_SheathCutSheetEq	NUMBER		1	1	Partial-sheet total converted into 32 sf sheet equivalents.	1	0
+PARAM	57bba2f1-36d3-4398-a394-0fc6b80cada4	WF_SheathTotalSheetEq	NUMBER		1	1	Full sheets plus reusable partial-sheet equivalents.	1	0
+PARAM	847a73d7-40e5-4474-b7c6-ca16f49e14da	WF_SheathCutSummary	TEXT		1	1	Compact cut-size summary for the sheathing schedule.	1	1

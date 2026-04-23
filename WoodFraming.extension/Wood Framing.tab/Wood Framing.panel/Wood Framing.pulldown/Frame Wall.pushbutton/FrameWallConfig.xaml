@@ -1,7 +1,7 @@
 <Window xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
         xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
         Title="Frame Wall Configuration"
-        Height="620" Width="440"
+        Height="590" Width="440"
         WindowStartupLocation="CenterScreen"
         ResizeMode="NoResize"
         ShowInTaskbar="False">
@@ -27,21 +27,21 @@
 
         <!-- Stud Family/Type -->
         <TextBlock Grid.Row="0" Grid.Column="0"
-                   Text="Stud Type:" VerticalAlignment="Center" Margin="0,4"/>
+                   Text="Stud Family:" VerticalAlignment="Center" Margin="0,4"/>
         <ComboBox Grid.Row="0" Grid.Column="1"
                   x:Name="cb_stud_type" Margin="0,4"
                   IsEditable="False"/>
 
         <!-- Plate Family/Type -->
         <TextBlock Grid.Row="1" Grid.Column="0"
-                   Text="Plate Type:" VerticalAlignment="Center" Margin="0,4"/>
+                   Text="Plate Family:" VerticalAlignment="Center" Margin="0,4"/>
         <ComboBox Grid.Row="1" Grid.Column="1"
                   x:Name="cb_plate_type" Margin="0,4"
                   IsEditable="False"/>
 
         <!-- Header Family/Type -->
         <TextBlock Grid.Row="2" Grid.Column="0"
-                   Text="Header Type:" VerticalAlignment="Center" Margin="0,4"/>
+                   Text="Header Family:" VerticalAlignment="Center" Margin="0,4"/>
         <ComboBox Grid.Row="2" Grid.Column="1"
                   x:Name="cb_header_type" Margin="0,4"
                   IsEditable="False"/>
@@ -84,12 +84,6 @@
                 <TextBlock Text=" ft" VerticalAlignment="Center"/>
             </StackPanel>
         </StackPanel>
-
-        <TextBlock Grid.Row="6" Grid.Column="0"
-                   Text="Wall Line:" VerticalAlignment="Center" Margin="0,4"/>
-        <ComboBox Grid.Row="6" Grid.Column="1"
-                  x:Name="cb_wall_layer_mode" Margin="0,4"
-                  IsEditable="False"/>
 
         <!-- Options -->
         <TextBlock Grid.Row="7" Grid.Column="0"

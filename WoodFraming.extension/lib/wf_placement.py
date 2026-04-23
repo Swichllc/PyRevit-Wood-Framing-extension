@@ -13,6 +13,7 @@ value computed by the framing engine for each member.
 
 from wf_geometry import inches_to_feet
 from wf_families import activate_symbol, find_family_symbol
+from wf_schedule_utils import ensure_bom_parameters, apply_bom_metadata_from_member
 from wf_tracking import tag_instance
 
 
@@ -43,6 +44,11 @@ class BaseFramingEngine(object):
         level = self.doc.GetElement(host_info.level_id)
         placed = []
         self._last_placed_pairs = []
+
+        try:
+            ensure_bom_parameters(self.doc)
+        except Exception:
+            pass
 
         for member in members:
             symbol = self._resolve_symbol(member)
@@ -102,6 +108,10 @@ class BaseFramingEngine(object):
                     tag_instance(instance, host_info, member)
                 except Exception:
                     pass
+            try:
+                apply_bom_metadata_from_member(instance, host_info, member)
+            except Exception:
+                pass
 
             placed.append(instance)
             self._last_placed_pairs.append((member, instance))

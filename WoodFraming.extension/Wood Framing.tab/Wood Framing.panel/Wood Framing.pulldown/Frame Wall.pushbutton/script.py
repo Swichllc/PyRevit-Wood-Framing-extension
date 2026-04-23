@@ -33,9 +33,7 @@ if _lib_dir not in sys.path:
 
 from wf_config import (
     FramingConfig,
-    LAYER_MODE_CORE_CENTER,
     LAYER_MODE_STRUCTURAL,
-    LAYER_MODE_THICKEST,
     SPACING_16OC,
     SPACING_24OC,
     WALL_BASE_MODE_WALL,
@@ -51,6 +49,7 @@ from wf_families import (
 from wf_host import analyze_wall_host
 from wf_geometry import safe_wall_normal
 from wf_wall_joins import build_wall_join_plan
+from wf_schedule_utils import ensure_bom_parameters, apply_bom_metadata
 
 logger = script.get_logger()
 output = script.get_output()
@@ -200,6 +199,15 @@ def _get_depth(symbol):
     return PLATE_THICKNESS
 
 
+class _WallBomHostInfo(object):
+    """Small host shim so legacy wall placement can stamp BOM metadata."""
+
+    def __init__(self, wall):
+        self.kind = "wall"
+        self.element = wall
+        self.element_id = getattr(wall, "Id", None)
+
+
 # =========================================================================
 #  Wall framing engine
 # =========================================================================
@@ -209,6 +217,7 @@ class WallFramer(object):
         self.doc = doc
         self.config = config
         self.placed = []
+        self._active_host_info = None
 
     def frame_wall(self, wall):
         loc_curve = wall.Location
@@ -235,6 +244,7 @@ class WallFramer(object):
                 target_offset = host_info.target_layer_offset
         except Exception:
             pass
+        self._active_host_info = host_info or _WallBomHostInfo(wall)
         if host_info is not None:
             direction = host_info.direction
             normal = host_info.normal
@@ -330,7 +340,10 @@ class WallFramer(object):
             for seg_s, seg_e in plate_segs:
                 s = p0 + direction * seg_s + DB.XYZ(0, 0, pz - base_z)
                 e = p0 + direction * seg_e + DB.XYZ(0, 0, pz - base_z)
-                self._place(place_beam(self.doc, s, e, plate_sym, level, PLATE_ROT))
+                self._place(
+                    place_beam(self.doc, s, e, plate_sym, level, PLATE_ROT),
+                    "BOTTOM_PLATE",
+                )
 
         # ==== B. MID PLATES + TOP PLATES ====
         min_top_z = min(z for _, z in top_profile)
@@ -359,7 +372,10 @@ class WallFramer(object):
             for seg_s, seg_e in mid_plate_segs:
                 s = p0 + direction * seg_s + DB.XYZ(0, 0, mid_center - base_z)
                 e = p0 + direction * seg_e + DB.XYZ(0, 0, mid_center - base_z)
-                self._place(place_beam(self.doc, s, e, plate_sym, level, PLATE_ROT))
+                self._place(
+                    place_beam(self.doc, s, e, plate_sym, level, PLATE_ROT),
+                    "MID_PLATE",
+                )
 
         # Top plates — run full wall length (no trim at corners)
         key_pts = self._simplify_profile(top_profile)
@@ -391,7 +407,7 @@ class WallFramer(object):
                 s = p0 + direction * seg_s + DB.XYZ(0, 0, z_start - off - base_z)
                 e = p0 + direction * seg_e + DB.XYZ(0, 0, z_end - off - base_z)
                 inst = place_beam(self.doc, s, e, plate_sym, level, PLATE_ROT)
-                self._place(inst)
+                self._place(inst, "TOP_PLATE")
                 # Track the lowest top-plate run on sloped walls for stud attachment.
                 # A wall can have short flat segments even when the overall top is angled.
                 if inst and i == 0 and wall_is_sloped:
@@ -432,7 +448,7 @@ class WallFramer(object):
                             sl = _stud_columns if ti == last_tier else None
                             self._place_stud(p0, direction, kd_c, t_bot,
                                              t_h, stud_sym, level, wall_angle, base_z,
-                                             sl)
+                                             sl, "KING_STUD")
                     occupied.add(round(kd_c, 4))
 
             if self.config.include_jack_studs and head_z > stud_bottom:
@@ -442,7 +458,8 @@ class WallFramer(object):
                     if self._near(jd_c, occupied):
                         continue
                     self._place_stud(p0, direction, jd_c, stud_bottom,
-                                     jack_h, stud_sym, level, wall_angle, base_z)
+                                     jack_h, stud_sym, level, wall_angle, base_z,
+                                     None, "JACK_STUD")
                     occupied.add(round(jd_c, 4))
 
         # ==== D. HEADERS + SILLS + CRIPPLES ====
@@ -477,7 +494,10 @@ class WallFramer(object):
                     hp_z = head_z + PLATE_THICKNESS / 2.0
                     hps = p0 + direction * span_s + DB.XYZ(0, 0, hp_z - base_z)
                     hpe = p0 + direction * span_e + DB.XYZ(0, 0, hp_z - base_z)
-                    self._place(place_beam(self.doc, hps, hpe, plate_sym, level, PLATE_ROT))
+                    self._place(
+                        place_beam(self.doc, hps, hpe, plate_sym, level, PLATE_ROT),
+                        "HEADER_PLATE",
+                    )
 
                 # Header member(s) on-edge above head plate — side by side
                 header_base = head_z + PLATE_THICKNESS
@@ -488,7 +508,10 @@ class WallFramer(object):
                     n_shift = normal * y_off
                     hs = p0 + direction * span_s + DB.XYZ(n_shift.X, n_shift.Y, hz - base_z)
                     he = p0 + direction * span_e + DB.XYZ(n_shift.X, n_shift.Y, hz - base_z)
-                    self._place(place_beam(self.doc, hs, he, header_sym, level, 0.0))
+                    self._place(
+                        place_beam(self.doc, hs, he, header_sym, level, 0.0),
+                        "HEADER",
+                    )
 
                 # Top plate above header assembly
                 header_top_z = header_base + h_depth
@@ -496,7 +519,10 @@ class WallFramer(object):
                     tp_z = header_top_z + PLATE_THICKNESS / 2.0
                     tps = p0 + direction * span_s + DB.XYZ(0, 0, tp_z - base_z)
                     tpe = p0 + direction * span_e + DB.XYZ(0, 0, tp_z - base_z)
-                    self._place(place_beam(self.doc, tps, tpe, plate_sym, level, PLATE_ROT))
+                    self._place(
+                        place_beam(self.doc, tps, tpe, plate_sym, level, PLATE_ROT),
+                        "HEADER_PLATE",
+                    )
                     header_top_z += PLATE_THICKNESS
 
                 # Cripple studs above header — aligned to wall OC grid
@@ -507,7 +533,7 @@ class WallFramer(object):
                     self._place_cripples_oc(p0, direction, left_e, right_e,
                                             header_top_z, crip_h, spacing,
                                             stud_sym, level, wall_angle, base_z,
-                                            occupied)
+                                            occupied, None, "CRIPPLE_STUD")
 
             # Sill plate for windows
             if is_win and sill_z > stud_bottom and plate_sym:
@@ -515,7 +541,10 @@ class WallFramer(object):
                 if right_e - left_e >= MIN_LENGTH:
                     ss = p0 + direction * left_e  + DB.XYZ(0, 0, sill_center - base_z)
                     se = p0 + direction * right_e + DB.XYZ(0, 0, sill_center - base_z)
-                    self._place(place_beam(self.doc, ss, se, plate_sym, level, PLATE_ROT))
+                    self._place(
+                        place_beam(self.doc, ss, se, plate_sym, level, PLATE_ROT),
+                        "SILL_PLATE",
+                    )
 
                 # Cripple studs below sill — aligned to wall OC grid
                 if self.config.include_cripple_studs:
@@ -525,7 +554,7 @@ class WallFramer(object):
                         self._place_cripples_oc(p0, direction, left_e, right_e,
                                                 stud_bottom, crip_h, spacing,
                                                 stud_sym, level, wall_angle, base_z,
-                                                occupied)
+                                                occupied, None, "CRIPPLE_STUD")
 
         # ==== E. JOIN / END STUDS (GEOMETRY-FIRST) ====
         phys_start_d, phys_end_d = self._physical_end_distances(
@@ -690,7 +719,10 @@ class WallFramer(object):
                 block_z = stud_bottom + stud_h / 2.0
                 bs = p0 + direction * (d_left + STUD_THICKNESS * 0.5) + DB.XYZ(0, 0, block_z - base_z)
                 be = p0 + direction * (d_right - STUD_THICKNESS * 0.5) + DB.XYZ(0, 0, block_z - base_z)
-                self._place(place_beam(self.doc, bs, be, plate_sym, level, PLATE_ROT))
+                self._place(
+                    place_beam(self.doc, bs, be, plate_sym, level, PLATE_ROT),
+                    "BLOCKING",
+                )
 
         # ==== H. ATTACH STUD TOPS TO PLATES ====
         self._attach_studs_to_plates(_stud_columns, _plate_beams)
@@ -698,23 +730,35 @@ class WallFramer(object):
         return True
 
     # ------------------------------------------------------------------
-    def _place(self, inst):
+    def _stamp_bom(self, inst, member_role, length_ft=None):
+        if inst is None or self._active_host_info is None:
+            return
+        try:
+            apply_bom_metadata(inst, self._active_host_info, member_role, length_ft)
+        except Exception:
+            pass
+
+    def _place(self, inst, member_role=None):
         if inst:
             self.placed.append(inst)
+            if member_role:
+                self._stamp_bom(inst, member_role)
 
     def _place_stud(self, p0, direction, d, bottom_z, height,
                     stud_sym, level, wall_angle, base_z,
-                    stud_list=None):
+                    stud_list=None, member_role="STUD"):
         pt = p0 + direction * d + DB.XYZ(0, 0, bottom_z - base_z)
         inst = place_column(self.doc, pt, height, stud_sym, level, wall_angle)
         if inst:
             self.placed.append(inst)
+            self._stamp_bom(inst, member_role, height)
             if stud_list is not None:
                 stud_list.append((inst, d))
 
     def _place_cripples_oc(self, p0, direction, left, right, bottom_z,
                            height, oc_spacing, stud_sym, level, wall_angle,
-                           base_z, occupied, stud_list=None):
+                           base_z, occupied, stud_list=None,
+                           member_role="CRIPPLE_STUD"):
         """Place cripple studs aligned to the wall's global OC grid."""
         if oc_spacing <= 0 or height < MIN_LENGTH:
             return
@@ -725,7 +769,7 @@ class WallFramer(object):
                 if not self._near(d, occupied):
                     self._place_stud(p0, direction, d, bottom_z, height,
                                      stud_sym, level, wall_angle, base_z,
-                                     stud_list)
+                                     stud_list, member_role)
             if d > right + STUD_THICKNESS:
                 break
             d += oc_spacing
@@ -1512,12 +1556,6 @@ class FrameWallDialog(forms.WPFWindow):
             if combo.Items.Count > 0:
                 combo.SelectedIndex = 0
 
-        self.cb_wall_layer_mode.Items.Clear()
-        self.cb_wall_layer_mode.Items.Add("Core center")
-        self.cb_wall_layer_mode.Items.Add("Structural layer")
-        self.cb_wall_layer_mode.Items.Add("Thickest layer")
-        self.cb_wall_layer_mode.SelectedIndex = 1
-
     def _restore_state(self):
         cfg = self._last_cfg
         if cfg is None:
@@ -1556,8 +1594,6 @@ class FrameWallDialog(forms.WPFWindow):
         self.chk_support_top.IsChecked = (
             getattr(cfg, "wall_base_mode", WALL_BASE_MODE_WALL) == WALL_BASE_MODE_SUPPORT_TOP
         )
-        mode_map = {"core_center": 0, "structural": 1, "thickest": 2}
-        self.cb_wall_layer_mode.SelectedIndex = mode_map.get(cfg.wall_layer_mode, 1)
 
     @staticmethod
     def _select_combo(combo, target):
@@ -1628,10 +1664,7 @@ class FrameWallDialog(forms.WPFWindow):
         cfg.wall_base_override_z = None
         cfg.wall_base_support_element_id = None
 
-        mode_idx = self.cb_wall_layer_mode.SelectedIndex
-        cfg.wall_layer_mode = [LAYER_MODE_CORE_CENTER,
-                               LAYER_MODE_STRUCTURAL,
-                               LAYER_MODE_THICKEST][mode_idx]
+        cfg.wall_layer_mode = LAYER_MODE_STRUCTURAL
 
         self.result_config = cfg
         self.DialogResult = True
@@ -1692,6 +1725,19 @@ def _pick_wall_support_element(doc):
         return None
 
 
+def _support_top_elevation(element):
+    """Return a coarse top elevation fallback for wall base alignment."""
+    if element is None:
+        return None
+    try:
+        bbox = element.get_BoundingBox(None)
+        if bbox is not None:
+            return bbox.Max.Z
+    except Exception:
+        pass
+    return None
+
+
 def main():
     doc = revit.doc
 
@@ -1747,6 +1793,7 @@ def main():
             getattr(support.Id, "IntegerValue", None),
         )
         config.wall_base_support_element_id = support_id
+        config.wall_base_override_z = _support_top_elevation(support)
 
     # Persist user options but not transient support element references.
     persist_cfg = FramingConfig.from_dict(config.to_dict())
@@ -1757,6 +1804,14 @@ def main():
     framer = WallFramer(doc, config)
     total = 0
     with revit.Transaction("WF: Frame Walls"):
+        try:
+            ensure_bom_parameters(doc)
+        except Exception as bom_param_err:
+            logger.warning(
+                "BOM parameter setup skipped during wall framing: {0}".format(
+                    bom_param_err
+                )
+            )
         for wall in walls:
             if framer.frame_wall(wall):
                 total += 1

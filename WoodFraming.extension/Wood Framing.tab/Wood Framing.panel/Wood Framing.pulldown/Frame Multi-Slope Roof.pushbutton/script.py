@@ -1,9 +1,5 @@
 # -*- coding: utf-8 -*-
-"""Frame multi-slope roofs with the clean V2 engine.
-
-This command uses the new per-field planner in `wf_roof_v2.py` and places real
-framing members without calling the legacy multi-slope logic in `wf_roof.py`.
-"""
+"""Frame multi-slope roofs with the clean V2 engine."""
 
 import os
 import sys
@@ -110,21 +106,17 @@ class FrameMultiSlopeV2Dialog(WPFWindow):
         config.include_ceiling_joists = False
         config.include_roof_kickers = False
 
-        self.result = {
-            "config": config,
-            "mode": "stick" if self.rb_stick.IsChecked else "truss",
-        }
-        self._save_last(config, self.result["mode"])
+        self.result = {"config": config}
+        self._save_last(config)
         self.Close()
 
     def _on_cancel(self, sender, args):
         self.result = None
         self.Close()
 
-    def _save_last(self, config, mode):
+    def _save_last(self, config):
         try:
             data = config.to_dict()
-            data["_roof_mode"] = mode
             data["_rafter_label"] = str(self.cb_rafter_type.SelectedItem or "")
             data["_ridge_label"] = str(self.cb_ridge_type.SelectedItem or "")
             data["_edge_label"] = str(self.cb_edge_type.SelectedItem or "")
@@ -142,12 +134,6 @@ class FrameMultiSlopeV2Dialog(WPFWindow):
                 return
             with open(_CFG_PATH, "r") as stream:
                 data = json.load(stream)
-
-            mode = data.get("_roof_mode", "stick")
-            if mode == "truss":
-                self.rb_truss.IsChecked = True
-            else:
-                self.rb_stick.IsChecked = True
 
             rafter_label = data.get("_rafter_label", "")
             if rafter_label and rafter_label in self._framing_labels:
@@ -219,12 +205,6 @@ def main():
     dialog.ShowDialog()
     if dialog.result is None:
         return
-    if dialog.result["mode"] == "truss":
-        forms.alert(
-            "Frame Multi-Slope Roof currently supports stick-style framing only.",
-            title="Frame Multi-Slope Roof",
-        )
-        return
     config = dialog.result["config"]
 
     roofs = _select_roofs(doc)
@@ -235,9 +215,9 @@ def main():
     engine = RoofFramingEngineV2(doc, config)
     output.print_md(
         "## Frame Multi-Slope Roof\n"
-        "- **Rafter type:** {0} : {1}\n"
-        "- **Ridge board type:** {2} : {3}\n"
-        "- **Eave / border type:** {4} : {5}\n"
+        "- **Rafter family:** {0} : {1}\n"
+        "- **Ridge board family:** {2} : {3}\n"
+        "- **Eave / border family:** {4} : {5}\n"
         "- **Spacing:** {6:.2f} in OC\n"
         "- **Current scope:** rafters, ridge boards, and border members\n"
         "- **Engine build:** {7}".format(
@@ -251,6 +231,7 @@ def main():
             V2_BUILD_TAG,
         )
     )
+
     total_roofs = 0
     total_members = 0
     total_placed = 0
@@ -299,6 +280,7 @@ def main():
                 placement_field_count = len(_placement_fields_for_plan(plan))
             except Exception:
                 placement_field_count = 0
+
             output.print_md(
                 "- Roof {0}: {1} members generated, {2} placed, {3} placement fields selected ({4} analyzed)".format(
                     roof_id,
@@ -308,6 +290,7 @@ def main():
                     analyzed_field_count,
                 )
             )
+
             type_counts = {}
             for member in members:
                 member_type = getattr(member, "member_type", "UNKNOWN")

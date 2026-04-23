@@ -1,9 +1,5 @@
 # -*- coding: utf-8 -*-
-"""Single-Slope Roof Framing — generate roof framing for shed roofs.
-
-Supports stick framing (rafters, ridge board, collar ties) and
-truss placement.  Uses a WPF dialog for configuration.
-"""
+"""Single-slope roof framing for shed roofs."""
 
 import os
 import sys
@@ -26,16 +22,11 @@ from pyrevit.forms import WPFWindow
 from Autodesk.Revit.UI.Selection import ObjectType, ISelectionFilter
 
 from wf_config import FramingConfig, SPACING_16OC, SPACING_24OC
-from wf_families import (
-    get_available_types_flat,
-    get_column_types_flat,
-    parse_family_type_label,
-)
+from wf_families import get_available_types_flat, parse_family_type_label
 from wf_roof import RoofFramingEngine
 
-logger = script.get_logger()
-output = script.get_output()
 
+output = script.get_output()
 _XAML = os.path.join(os.path.dirname(__file__), "FrameRoofConfig.xaml")
 _CFG_PATH = os.path.join(
     os.environ.get("APPDATA", ""),
@@ -43,20 +34,13 @@ _CFG_PATH = os.path.join(
 )
 
 
-# ======================================================================
-#  Selection filter
-# ======================================================================
-
 class _RoofFilter(ISelectionFilter):
     def AllowElement(self, elem):
         return isinstance(elem, DB.RoofBase)
+
     def AllowReference(self, ref, pt):
         return False
 
-
-# ======================================================================
-#  WPF Dialog
-# ======================================================================
 
 class FrameRoofDialog(WPFWindow):
     def __init__(self, doc):
@@ -88,24 +72,18 @@ class FrameRoofDialog(WPFWindow):
     def _on_ok(self, sender, args):
         cfg = FramingConfig()
 
-        # Mode
-        mode = "stick" if self.rb_stick.IsChecked else "truss"
+        rafter_sel = self.cb_rafter_type.SelectedItem
+        if rafter_sel:
+            family_name, type_name = parse_family_type_label(str(rafter_sel))
+            cfg.stud_family_name = family_name
+            cfg.stud_type_name = type_name
 
-        # Rafter type
-        sel = self.cb_rafter_type.SelectedItem
-        if sel:
-            fam, typ = parse_family_type_label(str(sel))
-            cfg.stud_family_name = fam
-            cfg.stud_type_name = typ
-
-        # Ridge type
         ridge_sel = self.cb_ridge_type.SelectedItem
         if ridge_sel:
-            rfam, rtyp = parse_family_type_label(str(ridge_sel))
-            cfg.header_family_name = rfam
-            cfg.header_type_name = rtyp
+            family_name, type_name = parse_family_type_label(str(ridge_sel))
+            cfg.header_family_name = family_name
+            cfg.header_type_name = type_name
 
-        # Spacing
         if self.rb_16oc.IsChecked:
             cfg.stud_spacing = SPACING_16OC
         elif self.rb_24oc.IsChecked:
@@ -116,37 +94,28 @@ class FrameRoofDialog(WPFWindow):
             except Exception:
                 cfg.stud_spacing = SPACING_16OC
 
-        self.result = {
-            "config": cfg,
-            "mode": mode,
-            "collar_ties": bool(self.chk_collar_ties.IsChecked),
-        }
+        cfg.include_collar_ties = False
+        cfg.include_ceiling_joists = False
+        cfg.include_roof_kickers = False
 
-        cfg.include_collar_ties = bool(self.chk_collar_ties.IsChecked)
-        cfg.include_ceiling_joists = bool(self.chk_ceiling_joists.IsChecked)
-        cfg.include_roof_kickers = bool(self.chk_roof_kickers.IsChecked)
-
-        self._save_last(cfg, mode)
+        self.result = {"config": cfg}
+        self._save_last(cfg)
         self.Close()
 
     def _on_cancel(self, sender, args):
         self.result = None
         self.Close()
 
-    def _save_last(self, cfg, mode):
+    def _save_last(self, cfg):
         try:
             data = cfg.to_dict()
-            data["_roof_mode"] = mode
             data["_rafter_label"] = str(self.cb_rafter_type.SelectedItem or "")
             data["_ridge_label"] = str(self.cb_ridge_type.SelectedItem or "")
-            data["_collar_ties"] = bool(self.chk_collar_ties.IsChecked)
-            data["_ceiling_joists"] = bool(self.chk_ceiling_joists.IsChecked)
-            data["_roof_kickers"] = bool(self.chk_roof_kickers.IsChecked)
-            d = os.path.dirname(_CFG_PATH)
-            if not os.path.exists(d):
-                os.makedirs(d)
-            with open(_CFG_PATH, "w") as f:
-                json.dump(data, f, indent=2)
+            directory = os.path.dirname(_CFG_PATH)
+            if not os.path.exists(directory):
+                os.makedirs(directory)
+            with open(_CFG_PATH, "w") as stream:
+                json.dump(data, stream, indent=2)
         except Exception:
             pass
 
@@ -154,43 +123,28 @@ class FrameRoofDialog(WPFWindow):
         try:
             if not os.path.exists(_CFG_PATH):
                 return
-            with open(_CFG_PATH, "r") as f:
-                data = json.load(f)
+            with open(_CFG_PATH, "r") as stream:
+                data = json.load(stream)
 
-            mode = data.get("_roof_mode", "stick")
-            if mode == "truss":
-                self.rb_truss.IsChecked = True
-            else:
-                self.rb_stick.IsChecked = True
-
-            raft_label = data.get("_rafter_label", "")
-            if raft_label and raft_label in self._framing_labels:
-                self.cb_rafter_type.SelectedItem = raft_label
+            rafter_label = data.get("_rafter_label", "")
+            if rafter_label and rafter_label in self._framing_labels:
+                self.cb_rafter_type.SelectedItem = rafter_label
 
             ridge_label = data.get("_ridge_label", "")
             if ridge_label and ridge_label in self._framing_labels:
                 self.cb_ridge_type.SelectedItem = ridge_label
 
-            sp = data.get("stud_spacing", SPACING_16OC)
-            if sp == SPACING_16OC:
+            spacing = data.get("stud_spacing", SPACING_16OC)
+            if spacing == SPACING_16OC:
                 self.rb_16oc.IsChecked = True
-            elif sp == SPACING_24OC:
+            elif spacing == SPACING_24OC:
                 self.rb_24oc.IsChecked = True
             else:
                 self.rb_custom_sp.IsChecked = True
-                self.tb_custom_spacing.Text = str(sp)
-
-            ct = data.get("_collar_ties", True)
-            self.chk_collar_ties.IsChecked = ct
-            self.chk_ceiling_joists.IsChecked = bool(data.get("_ceiling_joists", True))
-            self.chk_roof_kickers.IsChecked = bool(data.get("_roof_kickers", True))
+                self.tb_custom_spacing.Text = str(spacing)
         except Exception:
             pass
 
-
-# ======================================================================
-#  Main
-# ======================================================================
 
 def main():
     doc = revit.doc
@@ -204,9 +158,8 @@ def main():
         )
         return
 
-    # Select roofs
     selected = revit.get_selection().elements
-    roofs = [e for e in selected if isinstance(e, DB.RoofBase)]
+    roofs = [element for element in selected if isinstance(element, DB.RoofBase)]
 
     if not roofs:
         try:
@@ -215,7 +168,7 @@ def main():
                 _RoofFilter(),
                 "Select single-slope roofs to frame",
             )
-            roofs = [doc.GetElement(r.ElementId) for r in refs]
+            roofs = [doc.GetElement(ref.ElementId) for ref in refs]
         except Exception:
             return
 
@@ -223,16 +176,14 @@ def main():
         forms.alert("No roofs selected.", title="Wood Framing")
         return
 
-    # Show config dialog
-    dlg = FrameRoofDialog(doc)
-    dlg.ShowDialog()
-    if dlg.result is None:
+    dialog = FrameRoofDialog(doc)
+    dialog.ShowDialog()
+    if dialog.result is None:
         return
 
-    cfg = dlg.result["config"]
-    mode = dlg.result["mode"]
+    config = dialog.result["config"]
+    engine = RoofFramingEngine(doc, config)
 
-    engine = RoofFramingEngine(doc, cfg)
     total_placed = 0
     total_calculated = 0
     total_roofs = 0
@@ -242,16 +193,17 @@ def main():
     with revit.Transaction("WF: Frame Single-Slope Roofs"):
         for roof in roofs:
             try:
-                members, roof_info = engine.calculate_members(
-                    roof, mode=mode)
+                members, roof_info = engine.calculate_members(roof, mode="stick")
             except Exception as calc_err:
-                errors.append("Roof {0} calc error: {1}".format(
-                    roof.Id.Value, calc_err))
+                errors.append(
+                    "Roof {0} calc error: {1}".format(roof.Id.Value, calc_err)
+                )
                 continue
 
             if roof_info is None:
-                errors.append("Roof {0}: analyze_roof_host returned None".format(
-                    roof.Id.Value))
+                errors.append(
+                    "Roof {0}: analyze_roof_host returned None".format(roof.Id.Value)
+                )
                 continue
 
             if not getattr(roof_info, "single_slope_supported", True):
@@ -261,7 +213,7 @@ def main():
                         getattr(
                             roof_info,
                             "single_slope_support_reason",
-                            "Single-Slope Roof Framing currently supports shed roofs only.",
+                            "Single-slope roof framing currently supports shed roofs only.",
                         ),
                     )
                 )
@@ -270,24 +222,24 @@ def main():
 
             total_calculated += len(members)
 
-            # Diagnostic: show plane info
-            for pi, plane in enumerate(roof_info.planes):
+            for plane_index, plane in enumerate(roof_info.planes):
                 output.print_md(
                     "  - Plane {0}: normal=({1:.3f},{2:.3f},{3:.3f}), "
-                    "bounds=({4:.1f},{5:.1f},{6:.1f},{7:.1f}), "
-                    "loops={8}".format(
-                        pi,
+                    "bounds=({4:.1f},{5:.1f},{6:.1f},{7:.1f}), loops={8}".format(
+                        plane_index,
                         plane.normal.X, plane.normal.Y, plane.normal.Z,
                         plane.bounds[0], plane.bounds[1],
                         plane.bounds[2], plane.bounds[3],
                         len(plane.boundary_loops_local),
-                    ))
+                    )
+                )
 
             try:
                 placed = engine.place_members(members, roof_info)
             except Exception as place_err:
-                errors.append("Roof {0} place error: {1}".format(
-                    roof.Id.Value, place_err))
+                errors.append(
+                    "Roof {0} place error: {1}".format(roof.Id.Value, place_err)
+                )
                 placed = []
 
             total_placed += len(placed)
@@ -298,15 +250,18 @@ def main():
         "- **Roofs framed:** {0}\n"
         "- **Roofs skipped:** {1}\n"
         "- **Members calculated:** {2}\n"
-        "- **Members placed:** {3}\n"
-        "- **Mode:** {4}".format(
-            total_roofs, skipped_roofs, total_calculated, total_placed, mode)
+        "- **Members placed:** {3}".format(
+            total_roofs,
+            skipped_roofs,
+            total_calculated,
+            total_placed,
+        )
     )
 
     if errors:
         output.print_md("\n### Errors")
-        for err in errors:
-            output.print_md("- " + str(err))
+        for line in errors:
+            output.print_md("- " + str(line))
 
     if total_calculated > 0 and total_placed == 0:
         output.print_md(
@@ -322,7 +277,7 @@ def main():
     elif skipped_roofs and total_roofs == 0:
         output.print_md(
             "\n> **Note:** Multi-slope roofs are intentionally blocked while "
-            "the roof framing workflow is reset to a single-slope-only baseline."
+            "the roof framing workflow stays focused on the single-slope tool."
         )
 
 

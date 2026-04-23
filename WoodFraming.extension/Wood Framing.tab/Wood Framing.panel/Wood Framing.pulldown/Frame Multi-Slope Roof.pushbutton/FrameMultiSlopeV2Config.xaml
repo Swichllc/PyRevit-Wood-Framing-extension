@@ -1,17 +1,11 @@
 <Window xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
         xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
         Title="Multi-Slope Roof Framing"
-    Width="420" Height="520"
+    Width="420" Height="430"
         WindowStartupLocation="CenterScreen"
         ResizeMode="NoResize">
     <StackPanel Margin="12">
-        <TextBlock Text="Framing Mode" FontWeight="Bold" Margin="0,0,0,4"/>
-        <RadioButton x:Name="rb_stick" Content="Stick Frame (rafters + ridge)"
-                     IsChecked="True" Margin="0,2"/>
-        <RadioButton x:Name="rb_truss" Content="Truss Placement"
-                     Margin="0,2"/>
-
-        <TextBlock Text="Rafter / Truss Family" FontWeight="Bold" Margin="0,12,0,4"/>
+        <TextBlock Text="Rafter Family" FontWeight="Bold" Margin="0,0,0,4"/>
         <ComboBox x:Name="cb_rafter_type" Height="24"/>
 
         <TextBlock Text="Ridge Board Family" FontWeight="Bold" Margin="0,12,0,4"/>

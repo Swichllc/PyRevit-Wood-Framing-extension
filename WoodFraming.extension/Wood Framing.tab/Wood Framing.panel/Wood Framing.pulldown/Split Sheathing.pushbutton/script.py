@@ -1,13 +1,8 @@
 # -*- coding: utf-8 -*-
-"""Split Sheathing - Calculate sheathing panel layout.
-
-Divides a wall surface into standard 4'x8' sheathing panels
-and reports the cut list.
-"""
+"""Generate the native Revit sheathing schedule for selected hosts."""
 
 import os
 import sys
-import math
 
 _ext_dir = os.path.dirname(os.path.dirname(os.path.dirname(
     os.path.dirname(__file__)
@@ -22,80 +17,122 @@ if _lib_dir not in sys.path:
     sys.path.insert(0, _lib_dir)
 
 from pyrevit import revit, DB, script, forms
+from Autodesk.Revit.UI.Selection import ObjectType, ISelectionFilter
 
-from wf_geometry import analyze_wall, inches_to_feet
+from wf_schedule_utils import (
+    SHEATHING_SCHEDULE_NAME,
+    activate_schedule,
+    calculate_sheathing_for_host,
+    clear_all_sheathing_metadata,
+    create_or_update_sheathing_schedule,
+    ensure_sheathing_parameters,
+    stamp_sheathing_metadata,
+)
+
 
 output = script.get_output()
 
 
-# Standard sheathing panel dimensions
-PANEL_WIDTH = 4.0   # feet
-PANEL_HEIGHT = 8.0  # feet
+class _SheathingHostFilter(ISelectionFilter):
+    def AllowElement(self, element):
+        return _is_supported_host(element)
+
+    def AllowReference(self, reference, point):
+        return False
+
+
+def _is_supported_host(element):
+    if isinstance(element, DB.Wall):
+        return True
+    if isinstance(element, DB.Floor):
+        return True
+    if isinstance(element, DB.RoofBase):
+        return True
+
+    category = getattr(element, "Category", None)
+    if category is None:
+        return False
+    category_id = getattr(category.Id, "IntegerValue", getattr(category.Id, "Value", None))
+    return category_id == int(DB.BuiltInCategory.OST_Ceilings)
+
+
+def _select_hosts(doc):
+    seen = set()
+    hosts = []
+    for element in revit.get_selection().elements:
+        if not _is_supported_host(element):
+            continue
+        element_id = getattr(element.Id, "IntegerValue", getattr(element.Id, "Value", None))
+        if element_id in seen:
+            continue
+        seen.add(element_id)
+        hosts.append(element)
+    if hosts:
+        return hosts
+
+    try:
+        refs = revit.uidoc.Selection.PickObjects(
+            ObjectType.Element,
+            _SheathingHostFilter(),
+            "Select walls, floors, ceilings, and roofs for sheathing",
+        )
+    except Exception:
+        return []
+
+    for reference in refs:
+        element = doc.GetElement(reference.ElementId)
+        if not _is_supported_host(element):
+            continue
+        element_id = getattr(element.Id, "IntegerValue", getattr(element.Id, "Value", None))
+        if element_id in seen:
+            continue
+        seen.add(element_id)
+        hosts.append(element)
+    return hosts
 
 
 def main():
     doc = revit.doc
-
-    selected = revit.get_selection().elements
-    walls = [e for e in selected if isinstance(e, DB.Wall)]
-
-    if not walls:
+    hosts = _select_hosts(doc)
+    if not hosts:
         forms.alert(
-            "Select walls to calculate sheathing layout.",
+            "Select walls, floors, ceilings, or roofs to calculate sheathing.",
             title="Split Sheathing",
         )
         return
 
-    output.print_md("## Sheathing Layout")
+    results = []
+    with revit.Transaction("WF: Update Sheathing Schedule"):
+        ensure_sheathing_parameters(doc)
+        clear_all_sheathing_metadata(doc)
 
-    total_full = 0
-    total_partial = 0
+        for element in hosts:
+            result = calculate_sheathing_for_host(doc, element)
+            if result is None:
+                continue
+            stamp_sheathing_metadata(element, result)
+            results.append(result)
 
-    for wall in walls:
-        wall_info = analyze_wall(doc, wall)
-        if wall_info is None:
-            continue
+        schedule = create_or_update_sheathing_schedule(doc)
 
-        wall_length = wall_info.length
-        wall_height = wall_info.height
+    activate_schedule(schedule)
 
-        # Calculate horizontal panel count
-        h_count = int(math.ceil(wall_length / PANEL_WIDTH))
-        # Calculate vertical panel count
-        v_count = int(math.ceil(wall_height / PANEL_HEIGHT))
-
-        full_panels = 0
-        partial_panels = 0
-
-        for row in range(v_count):
-            remaining_height = wall_height - row * PANEL_HEIGHT
-            panel_h = min(PANEL_HEIGHT, remaining_height)
-
-            for col in range(h_count):
-                remaining_width = wall_length - col * PANEL_WIDTH
-                panel_w = min(PANEL_WIDTH, remaining_width)
-
-                if abs(panel_w - PANEL_WIDTH) < 0.01 and abs(panel_h - PANEL_HEIGHT) < 0.01:
-                    full_panels += 1
-                else:
-                    partial_panels += 1
-
-        total_full += full_panels
-        total_partial += partial_panels
-
-        output.print_md(
-            "**Wall {0}:** {1:.1f}' x {2:.1f}' = "
-            "{3} full panels + {4} cut panels".format(
-                wall.Id.Value,
-                wall_length, wall_height,
-                full_panels, partial_panels,
-            )
-        )
+    total_full = sum([result.get("full_sheets", 0) for result in results])
+    total_cut = sum([result.get("cut_count", 0) for result in results])
+    total_eq = sum([result.get("total_sheet_eq", 0.0) for result in results])
 
     output.print_md(
-        "\n---\n**Totals:** {0} full panels, {1} cut panels, "
-        "{2} total sheets needed".format(
-            total_full, total_partial, total_full + total_partial
+        "## Split Sheathing\n"
+        "- **Schedule updated:** {0}\n"
+        "- **Hosts processed:** {1}\n"
+        "- **Full sheets:** {2}\n"
+        "- **Cut panels:** {3}\n"
+        "- **Total sheet equivalent:** {4:.2f}".format(
+            SHEATHING_SCHEDULE_NAME,
+            len(results),
+            total_full,
+            total_cut,
+            total_eq,
         )
     )
 

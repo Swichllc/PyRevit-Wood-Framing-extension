@@ -206,14 +206,20 @@ def apply_wall_base_override_from_config(doc, wall_host_info, config):
 
     support_id = getattr(config, "wall_base_support_element_id", None)
     support = _get_element_by_any_id(doc, support_id)
-    if support is None:
-        return False
+    if support is not None:
+        target_base = _resolve_support_top_for_wall(doc, support, wall_host_info)
+        if target_base is not None:
+            return _shift_wall_host_base(wall_host_info, target_base)
 
-    target_base = _resolve_support_top_for_wall(doc, support, wall_host_info)
-    if target_base is None:
-        return False
+    # Fallback: use explicit override elevation if support sampling fails.
+    override_z = getattr(config, "wall_base_override_z", None)
+    if override_z is not None:
+        try:
+            return _shift_wall_host_base(wall_host_info, float(override_z))
+        except Exception:
+            return False
 
-    return _shift_wall_host_base(wall_host_info, target_base)
+    return False
 
 
 def _get_element_by_any_id(doc, raw_id):

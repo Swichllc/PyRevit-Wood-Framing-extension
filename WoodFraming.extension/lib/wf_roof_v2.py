@@ -14,6 +14,7 @@ from wf_config import LUMBER_ACTUAL
 from wf_geometry import FramingMember, inches_to_feet
 from wf_host import analyze_roof_host, _scanline_intervals
 from wf_placement import BaseFramingEngine
+from wf_schedule_utils import apply_bom_metadata
 
 
 FLAT_THRESHOLD = 0.9998
@@ -1682,6 +1683,11 @@ class RoofFramingEngineV2(BaseFramingEngine):
                         add_coping(rb_inst)
                     except Exception:
                         pass
+
+                try:
+                    apply_bom_metadata(r, host_info, "RAFTER")
+                except Exception:
+                    pass
 
                 placed_elements.append(r)
 
