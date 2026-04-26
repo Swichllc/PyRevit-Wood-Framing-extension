@@ -1,8 +1,0 @@
-title: Wall Framing 2.0
-tooltip: >-
-  Isolated wall framing redesign using the interior structural/core wall face
-  as the source geometry.
-author: Roi Hason @ Swich Design
-context:
-  any:
-    - OST_Walls

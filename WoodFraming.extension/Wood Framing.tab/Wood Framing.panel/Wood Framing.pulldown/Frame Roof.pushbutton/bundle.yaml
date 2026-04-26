@@ -1,5 +1,4 @@
 title: Single-Slope Roof Framing
 tooltip: >-
-  Select single-slope roofs and automatically generate roof framing.
-  Multi-slope roofs are disabled until the rewrite lands.
+  Frame selected single-slope roofs.
 author: Roi Hason @ Swich Design

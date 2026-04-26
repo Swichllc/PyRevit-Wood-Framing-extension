@@ -1,9 +1,5 @@
 # -*- coding: utf-8 -*-
-"""Wall Framing 2.0 command.
-
-This command uses the wall-cavity framing engine and does not call the
-legacy Frame Wall command script.
-"""
+"""Wall Framing command."""
 
 import json
 import os
@@ -42,6 +38,7 @@ from wf_wall_framing_v4 import ENGINE_NAME, WallCavityFramingV4Engine
 
 logger = script.get_logger()
 output = script.get_output()
+COMMAND_TITLE = "Wall Framing"
 _XAML = os.path.join(os.path.dirname(__file__), "FrameWall20Config.xaml")
 _CFG_PATH = os.path.join(
     os.environ.get("APPDATA", ""),
@@ -68,7 +65,7 @@ class WallFraming20Dialog(WPFWindow):
             self.cb_header_type.SelectedIndex = 0
 
         self.tb_summary.Text = (
-            "Frame {0} wall(s) with the wall-cavity Wall Framing engine."
+            "Frame {0} selected wall(s)."
             .format(wall_count)
         )
 
@@ -114,14 +111,14 @@ class WallFraming20Dialog(WPFWindow):
             try:
                 config.stud_spacing = float(self.tb_custom_spacing.Text)
             except Exception:
-                forms.alert("Invalid custom stud spacing.", title="Wall Framing 2.0")
+                forms.alert("Invalid custom stud spacing.", title=COMMAND_TITLE)
                 return None
         else:
             config.stud_spacing = SPACING_16OC
 
         stud_sel = self.cb_stud_type.SelectedItem
         if not stud_sel:
-            forms.alert("Select a stud column family.", title="Wall Framing 2.0")
+            forms.alert("Select a stud column family.", title=COMMAND_TITLE)
             return None
         config.stud_family_name, config.stud_type_name = parse_family_type_label(
             str(stud_sel)
@@ -144,7 +141,7 @@ class WallFraming20Dialog(WPFWindow):
         try:
             config.mid_plate_interval_ft = float(self.tb_mid_plate_height.Text)
         except Exception:
-            forms.alert("Invalid mid-plate interval.", title="Wall Framing 2.0")
+            forms.alert("Invalid mid-plate interval.", title=COMMAND_TITLE)
             return None
         config.include_king_studs = bool(self.chk_king_studs.IsChecked)
         config.include_jack_studs = bool(self.chk_jack_studs.IsChecked)
@@ -215,7 +212,7 @@ class WallFraming20Dialog(WPFWindow):
         self.chk_jack_studs.IsChecked = bool(data.get("jack", True))
         self.chk_cripple_studs.IsChecked = bool(data.get("cripple", True))
         self.chk_support_top.IsChecked = bool(data.get("support_top", False))
-        self.chk_clean_existing.IsChecked = bool(data.get("clean_existing", True))
+        self.chk_clean_existing.IsChecked = True
 
     @staticmethod
     def _select_if_present(combo, value):
@@ -259,7 +256,7 @@ def _pick_support(doc):
         ref = revit.uidoc.Selection.PickObject(
             ObjectType.Element,
             _WallSupportFilter(),
-            "Pick support host for Wall Framing 2.0 base",
+            "Pick floor, roof, or foundation for wall base",
         )
     except Exception:
         return None
@@ -369,10 +366,10 @@ def main():
     column_types = get_column_types_flat(doc)
     framing_types = get_available_types_flat(doc)
     if not column_types:
-        forms.alert("No Structural Column families loaded.", title="Wall Framing 2.0")
+        forms.alert("No Structural Column families loaded.", title=COMMAND_TITLE)
         return
     if not framing_types:
-        forms.alert("No Structural Framing families loaded.", title="Wall Framing 2.0")
+        forms.alert("No Structural Framing families loaded.", title=COMMAND_TITLE)
         return
 
     selected = revit.get_selection().elements
@@ -382,7 +379,7 @@ def main():
             refs = revit.uidoc.Selection.PickObjects(
                 ObjectType.Element,
                 _WallFilter(),
-                "Select walls for Wall Framing 2.0",
+                "Select walls for wall framing",
             )
             walls = [doc.GetElement(ref.ElementId) for ref in refs]
         except Exception:
@@ -399,7 +396,7 @@ def main():
     if config.wall_base_mode == WALL_BASE_MODE_SUPPORT_TOP:
         support = _pick_support(doc)
         if support is None:
-            forms.alert("Support host selection was cancelled.", title="Wall Framing 2.0")
+            forms.alert("Wall base selection was cancelled.", title=COMMAND_TITLE)
             return
         config.wall_base_override_z = _support_top_elevation(support)
 
@@ -410,7 +407,7 @@ def main():
     deleted_counts = {"wall_v4": 0, "wall_v2": 0, "wall": 0}
     audit_rows = []
 
-    with revit.Transaction("WF: Wall Framing 2.0"):
+    with revit.Transaction("WF: Wall Framing"):
         deleted_counts = _delete_existing_wall_members(
             doc,
             walls,
@@ -434,23 +431,24 @@ def main():
     for audit, placed_count in audit_rows:
         audit_table += _audit_line(audit, placed_count)
 
+    deleted_total = (
+        deleted_counts.get("wall_v4", 0)
+        + deleted_counts.get("wall_v2", 0)
+        + deleted_counts.get("wall", 0)
+    )
+
     output.print_md(
-        "## Wall Framing 2.0 Complete\n"
+        "## Wall Framing Complete\n"
         "- **Engine:** {0}\n"
         "- **Walls framed:** {1}\n"
         "- **Walls skipped:** {2}\n"
-        "- **Previous Wall Framing 4.0 members deleted:** {3}\n"
-        "- **Previous Wall Framing 2.0 members deleted:** {4}\n"
-        "- **Tracked legacy wall members deleted:** {5}\n"
-        "- **Members placed:** {6}\n"
-        "- **Legacy Frame Wall command code called:** No\n"
-        "{7}".format(
+        "- **Previous members replaced:** {3}\n"
+        "- **Members placed:** {4}\n"
+        "{5}".format(
             ENGINE_NAME,
             wall_count,
             skipped,
-            deleted_counts.get("wall_v4", 0),
-            deleted_counts.get("wall_v2", 0),
-            deleted_counts.get("wall", 0),
+            deleted_total,
             member_count,
             audit_table,
         )

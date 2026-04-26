@@ -1,0 +1,7 @@
+title: Wall Framing
+tooltip: >-
+  Frame selected walls.
+author: Roi Hason @ Swich Design
+context:
+  any:
+    - OST_Walls
