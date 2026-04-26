@@ -1,0 +1,140 @@
+<Window xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        Title="Wall Framing 2.0 - Clean Redesign"
+        Height="660" Width="520"
+        WindowStartupLocation="CenterScreen"
+        ResizeMode="NoResize"
+        ShowInTaskbar="False">
+    <Grid Margin="12">
+        <Grid.RowDefinitions>
+            <RowDefinition Height="Auto"/>
+            <RowDefinition Height="Auto"/>
+            <RowDefinition Height="Auto"/>
+            <RowDefinition Height="Auto"/>
+            <RowDefinition Height="Auto"/>
+            <RowDefinition Height="Auto"/>
+            <RowDefinition Height="Auto"/>
+            <RowDefinition Height="Auto"/>
+            <RowDefinition Height="Auto"/>
+            <RowDefinition Height="Auto"/>
+            <RowDefinition Height="Auto"/>
+            <RowDefinition Height="*"/>
+            <RowDefinition Height="Auto"/>
+        </Grid.RowDefinitions>
+        <Grid.ColumnDefinitions>
+            <ColumnDefinition Width="140"/>
+            <ColumnDefinition Width="*"/>
+        </Grid.ColumnDefinitions>
+
+        <Border Grid.Row="0" Grid.ColumnSpan="2"
+                BorderBrush="#606060" BorderThickness="1"
+                Padding="8" Margin="0,0,0,10">
+            <StackPanel>
+                <TextBlock Text="WALL FRAMING 2.0 - CLEAN REDESIGN"
+                           FontWeight="Bold"/>
+                <TextBlock Text="Interior face outline + structural/core layer offset. Cleans tracked generated wall framing before the v2 run."
+                           TextWrapping="Wrap" Margin="0,4,0,0"/>
+            </StackPanel>
+        </Border>
+
+        <TextBlock Grid.Row="1" Grid.Column="0"
+                   Text="Stud Family:" VerticalAlignment="Center" Margin="0,4"/>
+        <ComboBox Grid.Row="1" Grid.Column="1"
+                  x:Name="cb_stud_type" Margin="0,4"
+                  IsEditable="False"/>
+
+        <TextBlock Grid.Row="2" Grid.Column="0"
+                   Text="Plate Family:" VerticalAlignment="Center" Margin="0,4"/>
+        <ComboBox Grid.Row="2" Grid.Column="1"
+                  x:Name="cb_plate_type" Margin="0,4"
+                  IsEditable="False"/>
+
+        <TextBlock Grid.Row="3" Grid.Column="0"
+                   Text="Header Family:" VerticalAlignment="Center" Margin="0,4"/>
+        <ComboBox Grid.Row="3" Grid.Column="1"
+                  x:Name="cb_header_type" Margin="0,4"
+                  IsEditable="False"/>
+
+        <TextBlock Grid.Row="4" Grid.Column="0"
+                   Text="Stud Spacing:" VerticalAlignment="Center" Margin="0,8"/>
+        <StackPanel Grid.Row="4" Grid.Column="1" Orientation="Horizontal" Margin="0,8">
+            <RadioButton x:Name="rb_16oc" Content='16&quot; OC' GroupName="spacing"
+                         IsChecked="True" Margin="0,0,16,0"/>
+            <RadioButton x:Name="rb_24oc" Content='24&quot; OC' GroupName="spacing"
+                         Margin="0,0,16,0"/>
+            <RadioButton x:Name="rb_custom" Content="Custom:" GroupName="spacing"/>
+            <TextBox x:Name="tb_custom_spacing" Width="50" Margin="4,0,0,0"
+                     Text="16" IsEnabled="False"/>
+            <TextBlock Text=' "' VerticalAlignment="Center"/>
+        </StackPanel>
+
+        <TextBlock Grid.Row="5" Grid.Column="0"
+                   Text="Top Plates:" VerticalAlignment="Center" Margin="0,4"/>
+        <StackPanel Grid.Row="5" Grid.Column="1" Orientation="Horizontal" Margin="0,4">
+            <RadioButton x:Name="rb_single_top" Content="Single"
+                         GroupName="topplate" Margin="0,0,16,0"/>
+            <RadioButton x:Name="rb_double_top" Content="Double"
+                         GroupName="topplate" IsChecked="True"/>
+        </StackPanel>
+
+        <TextBlock Grid.Row="6" Grid.Column="0"
+                   Text="Mid Plates:" VerticalAlignment="Center" Margin="0,4"/>
+        <StackPanel Grid.Row="6" Grid.Column="1" Margin="0,4">
+            <CheckBox x:Name="chk_mid_plates"
+                      Content='Add from bottom plate baseline'
+                      IsChecked="True" Margin="0,0,0,4"/>
+            <StackPanel Orientation="Horizontal">
+                <TextBlock Text="Height interval:" VerticalAlignment="Center"/>
+                <TextBox x:Name="tb_mid_plate_height" Width="55" Margin="6,0,0,0"
+                         Text="8"/>
+                <TextBlock Text=" ft" VerticalAlignment="Center"/>
+            </StackPanel>
+        </StackPanel>
+
+        <TextBlock Grid.Row="7" Grid.Column="0"
+                   Text="Options:" VerticalAlignment="Top" Margin="0,8"/>
+        <StackPanel Grid.Row="7" Grid.Column="1" Margin="0,8">
+            <CheckBox x:Name="chk_king_studs" Content="King studs at openings"
+                      IsChecked="True" Margin="0,2"/>
+            <CheckBox x:Name="chk_jack_studs" Content="Jack/trimmer studs"
+                      IsChecked="True" Margin="0,2"/>
+            <CheckBox x:Name="chk_cripple_studs" Content="Cripple studs"
+                      IsChecked="True" Margin="0,2"/>
+        </StackPanel>
+
+        <TextBlock Grid.Row="8" Grid.Column="0"
+                   Text="Wall Base:" VerticalAlignment="Center" Margin="0,8"/>
+        <CheckBox Grid.Row="8" Grid.Column="1"
+                  x:Name="chk_support_top"
+                  Content="Use selected support host top as wall base"
+                  Margin="0,8"/>
+
+        <TextBlock Grid.Row="9" Grid.Column="0"
+                   Text="Clean Test:" VerticalAlignment="Top" Margin="0,8"/>
+        <CheckBox Grid.Row="9" Grid.Column="1"
+                  x:Name="chk_clean_existing"
+                  IsChecked="True"
+                  Margin="0,8">
+            <TextBlock Text="Delete tracked generated wall framing on selected walls before placing 2.0"
+                       TextWrapping="Wrap"/>
+        </CheckBox>
+
+        <TextBlock Grid.Row="10" Grid.ColumnSpan="2"
+                   x:Name="tb_summary" Margin="0,8"
+                   TextWrapping="Wrap" FontStyle="Italic"
+                   Foreground="Gray"/>
+
+        <StackPanel Grid.Row="12" Grid.ColumnSpan="2"
+                    Orientation="Horizontal" HorizontalAlignment="Right"
+                    Margin="0,8,0,0">
+            <Button x:Name="btn_ok" Content="Frame"
+                    Width="90" Height="28" Margin="0,0,8,0"
+                    IsDefault="True"
+                    Click="btn_ok_click"/>
+            <Button x:Name="btn_cancel" Content="Cancel"
+                    Width="90" Height="28"
+                    IsCancel="True"
+                    Click="btn_cancel_click"/>
+        </StackPanel>
+    </Grid>
+</Window>

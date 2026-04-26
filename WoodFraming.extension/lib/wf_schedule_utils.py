@@ -286,6 +286,9 @@ def backfill_bom_metadata(doc):
                 )
                 continue
 
+        if _has_bom_host_metadata(element):
+            continue
+
         comments = _comments_text(element)
         if "WF_Generated" in comments:
             _clear_bom_metadata(element)
@@ -826,6 +829,13 @@ def _clear_bom_metadata(element):
     _set_shared_double(element, "WF_MemberLength", 0.0)
 
 
+def _has_bom_host_metadata(element):
+    """Return True when shared BOM fields are already populated."""
+    return _shared_yesno_value(element, "WF_IsGenerated") and bool(
+        _shared_text_value(element, "WF_HostId")
+    )
+
+
 def _clear_sheathing_metadata(element):
     _set_shared_text(element, "WF_SheathHostLabel", None)
     _set_shared_int(element, "WF_SheathFullSheets", 0)
@@ -878,6 +888,26 @@ def _set_shared_double(element, name, value):
         parameter.Set(float(value or 0.0))
     except Exception:
         pass
+
+
+def _shared_text_value(element, name):
+    parameter = element.LookupParameter(name)
+    if parameter is None:
+        return ""
+    try:
+        return parameter.AsString() or ""
+    except Exception:
+        return ""
+
+
+def _shared_yesno_value(element, name):
+    parameter = element.LookupParameter(name)
+    if parameter is None:
+        return False
+    try:
+        return bool(parameter.AsInteger())
+    except Exception:
+        return False
 
 
 def _collect_elements(doc, categories):

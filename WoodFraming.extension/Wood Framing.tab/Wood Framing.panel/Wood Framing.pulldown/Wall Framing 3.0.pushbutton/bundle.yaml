@@ -1,0 +1,8 @@
+title: Wall Framing 3.0
+tooltip: >-
+  Standalone wall framing command. Does not import or call the existing wood
+  framing project libraries.
+author: Roi Hason @ Swich Design
+context:
+  any:
+    - OST_Walls

@@ -5,13 +5,9 @@ Studs (vertical)   -> Structural Column families (OST_StructuralColumns)
 Plates / Headers    -> Structural Framing families (OST_StructuralFraming)
 
 Construction sequence per wall:
-  A. Bottom plate(s)
-  B. Mid plates (fire blocking every 8 ft) + top plates (follow wall profile)
-  C. Opening framing: king studs, jack/trimmer studs
-  D. Opening headers (doubled/tripled) + sill plates + cripple studs
-  E. Corner / end studs
-  F. Infill studs at OC spacing (split at mid-plate tiers)
-  G. Blocking / bridging at mid-height for tall stud runs
+  1. Wall shape: bottom plates, top plates, and side studs from the side face.
+  2. Openings: king studs, jack/trimmer studs, headers, sills, and cripples.
+  3. Infill: mid plates, OC studs, and blocking inside the remaining spaces.
 """
 
 import os
@@ -48,8 +44,8 @@ from wf_families import (
 )
 from wf_host import analyze_wall_host
 from wf_geometry import safe_wall_normal
-from wf_wall_joins import build_wall_join_plan
 from wf_schedule_utils import ensure_bom_parameters, apply_bom_metadata
+from wf_tracking import get_tracking_data, tag_instance
 
 logger = script.get_logger()
 output = script.get_output()
@@ -63,6 +59,7 @@ MIN_LENGTH      = 1.0 / 12.0   # 1 in minimum member
 MID_PLATE_INTERVAL = 8.0       # fire blocking every 8 ft
 BLOCKING_MAX_HEIGHT = 8.0      # add mid-height blocking if stud > 8 ft
 PLATE_ROT = -math.pi / 2.0     # plates lay flat
+FRAME_WALL_ENGINE = "interior-face-v2"
 
 # Config persistence (remembers last dialog settings across sessions)
 _CFG_PATH = os.path.join(
@@ -208,6 +205,17 @@ class _WallBomHostInfo(object):
         self.element_id = getattr(wall, "Id", None)
 
 
+class _WallTrackedMember(object):
+    """Minimal member descriptor for legacy wall tracking/BOM backfill."""
+
+    def __init__(self, host_info, member_role):
+        self.member_type = member_role
+        self.host_kind = getattr(host_info, "kind", None)
+        self.host_id = getattr(host_info, "element_id", None)
+        target_layer = getattr(host_info, "target_layer", None)
+        self.layer_index = getattr(target_layer, "index", None)
+
+
 # =========================================================================
 #  Wall framing engine
 # =========================================================================
@@ -227,7 +235,6 @@ class WallFramer(object):
         if not isinstance(curve, DB.Line):
             return False
 
-        length = curve.Length
         p0 = curve.GetEndPoint(0)
         p1 = curve.GetEndPoint(1)
         direction = (p1 - p0).Normalize()
@@ -237,34 +244,22 @@ class WallFramer(object):
         wall_angle = math.atan2(direction.Y, direction.X)
 
         host_info = None
-        target_offset = 0.0
         try:
             host_info = analyze_wall_host(self.doc, wall, self.config)
-            if host_info is not None:
-                target_offset = host_info.target_layer_offset
         except Exception:
             pass
         self._active_host_info = host_info or _WallBomHostInfo(wall)
         if host_info is not None:
             direction = host_info.direction
             normal = host_info.normal
-            length = host_info.length
             wall_angle = host_info.wall_info.angle
             level = self.doc.GetElement(host_info.level_id)
             if level is None:
                 return False
             base_z = host_info.base_elevation
             p0 = host_info.point_at(0.0, 0.0)
-            p1 = host_info.point_at(length, 0.0)
-            # Read the wall's own profile — sketch for edited shapes,
-            # bounding-box for standard rectangular walls.
-            top_profile = self._wall_top_profile(
-                wall, p0, direction, base_z, length)
-            openings = self._opening_dicts_from_host_info(host_info)
+            host_openings = self._opening_dicts_from_host_info(host_info)
         else:
-            p0 = p0 + normal * target_offset
-            p1 = p1 + normal * target_offset
-
             level = self.doc.GetElement(wall.LevelId)
             if level is None:
                 return False
@@ -273,26 +268,34 @@ class WallFramer(object):
             if p_off and p_off.HasValue:
                 base_z += p_off.AsDouble()
             p0 = DB.XYZ(p0.X, p0.Y, base_z)
-            p1 = DB.XYZ(p1.X, p1.Y, base_z)
+            host_openings = self._get_openings(wall, p0, direction, base_z)
 
-            h_param = wall.get_Parameter(DB.BuiltInParameter.WALL_USER_HEIGHT_PARAM)
-            wall_height = h_param.AsDouble() if (h_param and h_param.HasValue) else 8.0
+        face_shape = self._wall_face_shape(
+            wall,
+            p0,
+            direction,
+            normal,
+            base_z,
+        )
+        if face_shape is None:
+            logger.warning(
+                "Wall {0}: side-face outline was not readable; skipped wall framing "
+                "instead of using location-curve endpoints.".format(wall.Id)
+            )
+            return False
 
-            top_profile = self._wall_top_profile(
-                wall, p0, direction, base_z, length)
-            openings = self._get_openings(wall, p0, direction, base_z)
-
-        join_plan = None
-        if host_info is not None:
-            try:
-                join_plan = build_wall_join_plan(
-                    self.doc,
-                    host_info,
-                    self.config,
-                    STUD_THICKNESS,
-                )
-            except Exception:
-                join_plan = None
+        face_end_d = face_shape["start_d"] + face_shape["length"]
+        trimmed_openings = self._trim_openings_to_span(
+            host_openings,
+            face_shape["start_d"],
+            face_end_d,
+        )
+        p0 = p0 + direction * face_shape["start_d"]
+        length = face_shape["length"]
+        top_profile = face_shape["top_profile"]
+        openings = self._merge_opening_sets(face_shape["openings"], trimmed_openings)
+        if length < MIN_LENGTH:
+            return False
 
         framing_cat = DB.BuiltInCategory.OST_StructuralFraming
         column_cat  = DB.BuiltInCategory.OST_StructuralColumns
@@ -334,7 +337,7 @@ class WallFramer(object):
         _plate_beams = []   # (inst, seg_start_d, seg_end_d, is_angled)
         _stud_columns = []  # (inst, d_position)
 
-        # ==== A. BOTTOM PLATES ====
+        # ==== 1A. WALL SHAPE - BOTTOM PLATES ====
         for i in range(self.config.bottom_plate_count):
             pz = base_z + i * PLATE_THICKNESS + PLATE_THICKNESS / 2.0
             for seg_s, seg_e in plate_segs:
@@ -345,7 +348,8 @@ class WallFramer(object):
                     "BOTTOM_PLATE",
                 )
 
-        # ==== B. MID PLATES + TOP PLATES ====
+        # Mid-plate elevations are tier breaks for the studs. The mid-plate
+        # members are placed with the infill stage after openings are framed.
         min_top_z = min(z for _, z in top_profile)
         min_stud_top = min_top_z - PLATE_THICKNESS * self.config.top_plate_count
         total_stud_height = min_stud_top - stud_bottom
@@ -363,21 +367,7 @@ class WallFramer(object):
                         continue
                     break
 
-        # Mid plates split at ALL openings (doors + windows), not just doors
-        all_opening_gaps = [(op["left"], op["right"]) for op in openings]
-        mid_plate_segs = self._split_segments(0.0, length, all_opening_gaps)
-
-        for mz in mid_plate_zs:
-            mid_center = mz + PLATE_THICKNESS / 2.0
-            for seg_s, seg_e in mid_plate_segs:
-                s = p0 + direction * seg_s + DB.XYZ(0, 0, mid_center - base_z)
-                e = p0 + direction * seg_e + DB.XYZ(0, 0, mid_center - base_z)
-                self._place(
-                    place_beam(self.doc, s, e, plate_sym, level, PLATE_ROT),
-                    "MID_PLATE",
-                )
-
-        # Top plates — run full wall length (no trim at corners)
+        # ==== 1B. WALL SHAPE - TOP PLATES ====
         key_pts = self._simplify_profile(top_profile)
         if key_pts:
             z_vals = [z for _, z in key_pts]
@@ -414,7 +404,23 @@ class WallFramer(object):
                     seg_is_angled = abs(z_end - z_start) > (1.0 / 96.0)
                     _plate_beams.append((inst, seg_s, seg_e, seg_is_angled))
 
-        # ==== C. KING STUDS & JACK STUDS ====
+        # ==== 1C. WALL SHAPE - SIDE STUDS ====
+        self._place_wall_side_studs(
+            p0,
+            direction,
+            length,
+            stud_bottom,
+            top_profile,
+            mid_plate_zs,
+            stud_sym,
+            level,
+            wall_angle,
+            base_z,
+            occupied,
+            _stud_columns,
+        )
+
+        # ==== 2A. OPENINGS - KING STUDS & JACK STUDS ====
         # Jack stud defines the RO — inner face at RO edge.
         # King stud is full-height, nailed to jack on the wall side.
         for op in openings:
@@ -462,7 +468,7 @@ class WallFramer(object):
                                      None, "JACK_STUD")
                     occupied.add(round(jd_c, 4))
 
-        # ==== D. HEADERS + SILLS + CRIPPLES ====
+        # ==== 2B. OPENINGS - HEADERS + SILLS + CRIPPLES ====
         for op in openings:
             left_e  = op["left"]
             right_e = op["right"]
@@ -479,6 +485,8 @@ class WallFramer(object):
             else:
                 span_s = left_e
                 span_e = right_e
+            span_s = max(0.0, span_s)
+            span_e = min(length, span_e)
             span_len = span_e - span_s
 
             if header_sym is not None and span_len >= MIN_LENGTH:
@@ -556,131 +564,21 @@ class WallFramer(object):
                                                 stud_sym, level, wall_angle, base_z,
                                                 occupied, None, "CRIPPLE_STUD")
 
-        # ==== E. JOIN / END STUDS (GEOMETRY-FIRST) ====
-        phys_start_d, phys_end_d = self._physical_end_distances(
-            wall, p0, direction, length, stud_bottom + STUD_THICKNESS)
-        if phys_end_d - phys_start_d < MIN_LENGTH:
-            phys_start_d, phys_end_d = (0.0, length)
+        # ==== 3A. INFILL - MID PLATES ====
+        all_opening_gaps = [(op["left"], op["right"]) for op in openings]
+        mid_plate_segs = self._split_segments(0.0, length, all_opening_gaps)
 
-        run_length = max(0.0, phys_end_d - phys_start_d)
-        edge_backset = STUD_THICKNESS * 0.5 + self._wrapped_layer_backset(host_info)
-        max_backset = max(0.0, (run_length - STUD_THICKNESS) * 0.5)
-        edge_backset = min(edge_backset, max_backset)
-
-        def _line_to_physical(line_dist):
-            if length <= 1e-9:
-                return (phys_start_d + phys_end_d) * 0.5
-            ratio = max(0.0, min(1.0, line_dist / length))
-            return phys_start_d + (phys_end_d - phys_start_d) * ratio
-
-        def _has_revit_join_at_end(end_index):
-            try:
-                return bool(DB.WallUtils.IsWallJoinAllowedAtEnd(wall, end_index))
-            except Exception:
-                return True
-
-        def _place_join_stud_piece(pos):
-            """Place one join/end stud split by mid-plate tiers."""
-            pos = max(phys_start_d, min(phys_end_d, pos))
-            if self._near(pos, occupied, STUD_THICKNESS * 0.9):
-                return True
-            if self._in_opening(pos, openings):
-                return False
-
-            local_top = self._top_of_stud_at(top_profile, pos)
-            tier_bounds = [stud_bottom] + list(mid_plate_zs) + [local_top]
-            last_tier = len(tier_bounds) - 2
-            placed_any = False
-            for ti in range(len(tier_bounds) - 1):
-                t_bot = tier_bounds[ti]
-                t_top = tier_bounds[ti + 1]
-                if ti > 0:
-                    t_bot += PLATE_THICKNESS
-                t_h = t_top - t_bot
-                if t_h >= MIN_LENGTH:
-                    sl = _stud_columns if ti == last_tier else None
-                    self._place_stud(p0, direction, pos, t_bot,
-                                     t_h, stud_sym, level, wall_angle, base_z,
-                                     sl)
-                    placed_any = True
-            if placed_any:
-                occupied.add(round(pos, 4))
-            return placed_any
-
-        def _place_end_stud_recipe(end_index, target_pos):
-            """Deterministic inward search from physical boundary."""
-            step = STUD_THICKNESS if end_index == 0 else -STUD_THICKNESS
-            for i in range(0, 7):
-                cand = target_pos + step * i
-                cand = max(phys_start_d, min(phys_end_d, cand))
-                if _place_join_stud_piece(cand):
-                    return
-
-        def _place_intersection_stud(target_pos):
-            if self._in_opening(target_pos, openings):
-                return
-            for offset in (0.0, STUD_THICKNESS, -STUD_THICKNESS):
-                if _place_join_stud_piece(target_pos + offset):
-                    return
-
-        for end_index in (0, 1):
-            has_revit_join = _has_revit_join_at_end(end_index)
-
-            if not has_revit_join:
-                free_target = (
-                    phys_start_d + edge_backset
-                    if end_index == 0
-                    else phys_end_d - edge_backset
+        for mz in mid_plate_zs:
+            mid_center = mz + PLATE_THICKNESS / 2.0
+            for seg_s, seg_e in mid_plate_segs:
+                s = p0 + direction * seg_s + DB.XYZ(0, 0, mid_center - base_z)
+                e = p0 + direction * seg_e + DB.XYZ(0, 0, mid_center - base_z)
+                self._place(
+                    place_beam(self.doc, s, e, plate_sym, level, PLATE_ROT),
+                    "MID_PLATE",
                 )
-                _place_end_stud_recipe(end_index, free_target)
-                continue
 
-            end_plan = None
-            if join_plan is not None:
-                try:
-                    end_plan = join_plan.ends.get(end_index)
-                except Exception:
-                    end_plan = None
-
-            line_positions = []
-            if end_plan is not None and end_plan.has_join:
-                if end_plan.positions:
-                    line_positions = list(end_plan.positions)
-
-            if not line_positions:
-                free_target = (
-                    phys_start_d + edge_backset
-                    if end_index == 0
-                    else phys_end_d - edge_backset
-                )
-                _place_end_stud_recipe(end_index, free_target)
-                continue
-
-            for line_pos in line_positions:
-                if line_pos < -1e-9 or line_pos > length + 1e-9:
-                    continue
-                _place_end_stud_recipe(end_index, _line_to_physical(line_pos))
-
-        if join_plan is not None:
-            for intersection in getattr(join_plan, "intersections", []) or []:
-                raw_positions = list(getattr(intersection, "positions", []) or [])
-                if not raw_positions:
-                    distance = getattr(intersection, "distance", None)
-                    if distance is None:
-                        continue
-                    raw_positions = [
-                        distance - (STUD_THICKNESS * 0.5),
-                        distance + (STUD_THICKNESS * 0.5),
-                    ]
-
-                for line_pos in raw_positions:
-                    if line_pos <= STUD_THICKNESS:
-                        continue
-                    if line_pos >= length - STUD_THICKNESS:
-                        continue
-                    _place_intersection_stud(_line_to_physical(line_pos))
-
-        # ==== F. INFILL STUDS (tier-based at mid plates) ====
+        # ==== 3B. INFILL - OC STUDS ====
         spacing = self.config.stud_spacing_ft
         if spacing > 0:
             d = spacing
@@ -704,7 +602,7 @@ class WallFramer(object):
                     occupied.add(rd)
                 d += spacing
 
-        # ==== G. MID-HEIGHT BLOCKING ====
+        # ==== 3C. INFILL - MID-HEIGHT BLOCKING ====
         sorted_occ = sorted(occupied)
         for i in range(len(sorted_occ) - 1):
             d_left  = sorted_occ[i]
@@ -724,12 +622,93 @@ class WallFramer(object):
                     "BLOCKING",
                 )
 
-        # ==== H. ATTACH STUD TOPS TO PLATES ====
+        # ==== FINALIZE. ATTACH STUD TOPS TO SLOPED PLATES ====
         self._attach_studs_to_plates(_stud_columns, _plate_beams)
 
         return True
 
-    # ------------------------------------------------------------------
+    def _place_wall_side_studs(self, p0, direction, length, stud_bottom, top_profile,
+                               mid_plate_zs, stud_sym, level, wall_angle, base_z,
+                               occupied, stud_list):
+        """Frame the actual wall boundary first, independent of wall joins."""
+        if length < MIN_LENGTH:
+            return
+
+        edge_center = min(STUD_THICKNESS * 0.5, max(0.0, length * 0.5))
+        positions = [edge_center]
+        far_edge = max(0.0, length - edge_center)
+        if abs(far_edge - positions[0]) > (STUD_THICKNESS * 0.5):
+            positions.append(far_edge)
+
+        for pos in positions:
+            self._place_tiered_full_height_stud(
+                p0,
+                direction,
+                pos,
+                stud_bottom,
+                top_profile,
+                mid_plate_zs,
+                stud_sym,
+                level,
+                wall_angle,
+                base_z,
+                occupied,
+                stud_list,
+                "SIDE_STUD",
+            )
+
+    def _place_tiered_full_height_stud(self, p0, direction, d, stud_bottom, top_profile,
+                                       mid_plate_zs, stud_sym, level, wall_angle,
+                                       base_z, occupied=None, stud_list=None,
+                                       member_role="STUD"):
+        """Place a full-height stud split at mid-plate tiers."""
+        if occupied is not None and self._near(d, occupied, STUD_THICKNESS * 0.9):
+            return False
+
+        local_top = self._top_of_stud_at(top_profile, d)
+        tier_bounds = [stud_bottom] + list(mid_plate_zs) + [local_top]
+        last_tier = len(tier_bounds) - 2
+        placed_any = False
+        for ti in range(len(tier_bounds) - 1):
+            t_bot = tier_bounds[ti]
+            t_top = tier_bounds[ti + 1]
+            if ti > 0:
+                t_bot += PLATE_THICKNESS
+            t_h = t_top - t_bot
+            if t_h >= MIN_LENGTH:
+                sl = stud_list if ti == last_tier else None
+                self._place_stud(
+                    p0,
+                    direction,
+                    d,
+                    t_bot,
+                    t_h,
+                    stud_sym,
+                    level,
+                    wall_angle,
+                    base_z,
+                    sl,
+                    member_role,
+                )
+                placed_any = True
+
+        if placed_any and occupied is not None:
+            occupied.add(round(d, 4))
+        return placed_any
+
+    def _track_member(self, inst, member_role):
+        """Tag legacy wall placements so schedule backfill can resolve the host."""
+        if inst is None or self._active_host_info is None:
+            return
+        try:
+            tag_instance(
+                inst,
+                self._active_host_info,
+                _WallTrackedMember(self._active_host_info, member_role),
+            )
+        except Exception:
+            pass
+
     def _stamp_bom(self, inst, member_role, length_ft=None):
         if inst is None or self._active_host_info is None:
             return
@@ -742,6 +721,7 @@ class WallFramer(object):
         if inst:
             self.placed.append(inst)
             if member_role:
+                self._track_member(inst, member_role)
                 self._stamp_bom(inst, member_role)
 
     def _place_stud(self, p0, direction, d, bottom_z, height,
@@ -751,6 +731,7 @@ class WallFramer(object):
         inst = place_column(self.doc, pt, height, stud_sym, level, wall_angle)
         if inst:
             self.placed.append(inst)
+            self._track_member(inst, member_role)
             self._stamp_bom(inst, member_role, height)
             if stud_list is not None:
                 stud_list.append((inst, d))
@@ -837,113 +818,6 @@ class WallFramer(object):
     def _top_of_stud_at(self, top_profile, d):
         top_z = self._interpolate_z(top_profile, d)
         return top_z - PLATE_THICKNESS * self.config.top_plate_count
-
-    # ------------------------------------------------------------------
-    #  Detect where other walls intersect this wall (T / + junctions)
-    # ------------------------------------------------------------------
-    def _find_wall_intersections(self, wall, p0, direction, length):
-        """Return list of distances along wall where other walls join.
-
-        Uses the wall's joined elements at each end plus any walls
-        whose endpoint lies on this wall's location line.
-        """
-        doc = self.doc
-        wall_id = wall.Id
-        dists = []
-
-        # Collect all walls on the same level
-        try:
-            walls = (
-                DB.FilteredElementCollector(doc)
-                .OfClass(DB.Wall)
-                .WhereElementIsNotElementType()
-            )
-        except Exception:
-            return dists
-
-        for other in walls:
-            try:
-                if other.Id == wall_id:
-                    continue
-                other_loc = other.Location
-                if other_loc is None:
-                    continue
-                other_curve = other_loc.Curve
-                if not isinstance(other_curve, DB.Line):
-                    continue
-
-                # Check if either endpoint of the other wall lies on this wall
-                for ei in (0, 1):
-                    ep = other_curve.GetEndPoint(ei)
-                    # Project onto this wall's direction
-                    vec = ep - p0
-                    d_along = vec.DotProduct(direction)
-                    # Perpendicular distance to this wall's line
-                    parallel_pt = p0 + direction * d_along
-                    perp_dist = ep.DistanceTo(parallel_pt)
-
-                    # Must be close to this wall (within wall thickness)
-                    # and not at the wall ends (those are corners, not T-junctions)
-                    if (perp_dist < 1.0 and
-                        d_along > STUD_THICKNESS * 3 and
-                        d_along < length - STUD_THICKNESS * 3):
-                        # Avoid duplicates
-                        is_dup = False
-                        for existing in dists:
-                            if abs(existing - d_along) < STUD_THICKNESS * 2:
-                                is_dup = True
-                                break
-                        if not is_dup:
-                            dists.append(d_along)
-            except Exception:
-                continue
-        return dists
-
-    def _connected_wall_ends(self, wall, p0, direction, length):
-        """Return (start_connected, end_connected) booleans.
-
-        True when another wall's endpoint meets this wall's start/end,
-        forming an L or T corner.  Used to decide whether to add a
-        second corner stud (only needed at free ends).
-        """
-        doc = self.doc
-        wall_id = wall.Id
-        ep_start = p0
-        ep_end = p0 + direction * length
-        start_conn = False
-        end_conn = False
-        tol = STUD_THICKNESS * 2
-
-        try:
-            walls = (
-                DB.FilteredElementCollector(doc)
-                .OfClass(DB.Wall)
-                .WhereElementIsNotElementType()
-            )
-        except Exception:
-            return (False, False)
-
-        for other in walls:
-            try:
-                if other.Id == wall_id:
-                    continue
-                oloc = other.Location
-                if oloc is None:
-                    continue
-                oc = oloc.Curve
-                if not isinstance(oc, DB.Line):
-                    continue
-                for ei in (0, 1):
-                    opt = oc.GetEndPoint(ei)
-                    if opt.DistanceTo(ep_start) < tol:
-                        start_conn = True
-                    if opt.DistanceTo(ep_end) < tol:
-                        end_conn = True
-                if start_conn and end_conn:
-                    break
-            except Exception:
-                continue
-        return (start_conn, end_conn)
 
     #  Detect ALL openings in a wall: doors, windows, curtain walls,
     #  rectangular openings (voids), and generic inserts.
@@ -1106,6 +980,9 @@ class WallFramer(object):
     def _opening_dicts_from_host_info(host_info):
         openings = []
         base_z = host_info.base_elevation
+        wall_info = getattr(host_info, "wall_info", None)
+        if wall_info is not None:
+            base_z = wall_info.level_elevation + wall_info.base_offset
         for opening in getattr(host_info, "openings", []):
             openings.append({
                 "left": opening.left_edge,
@@ -1248,137 +1125,299 @@ class WallFramer(object):
             return 0.0
         return max(0.0, (wall_width - target_width) * 0.5)
 
-    # ------------------------------------------------------------------
-    #  Wall top profile — read the wall's own shape
-    # ------------------------------------------------------------------
-    def _wall_top_profile(self, wall, p0, direction, base_z, length):
-        """Return [(d, z), ...] for the wall's top edge.
+    def _wall_face_shape(self, wall, p0, direction, normal, base_z):
+        """Read the actual wall side-face outline and openings from Revit."""
+        best = None
+        for face in self._get_wall_side_faces(wall, normal):
+            loops = self._face_loops_local(face, p0, direction)
+            if not loops:
+                continue
 
-        1. Edited-profile walls have a Sketch — read its curves.
-        2. Shoot vertical rays through the wall solid to detect the
-           actual shape (gable / attached-to-roof / any non-rectangular).
-        3. If rays fail, BoundingBox gives the correct flat top Z.
-        """
-        # BoundingBox top — always correct for the peak Z
-        bb_top = base_z + 8.0
-        try:
-            bb = wall.get_BoundingBox(None)
-            if bb is not None and bb.Max.Z > base_z + 0.01:
-                bb_top = bb.Max.Z
-        except Exception:
-            pass
+            outer_index = self._largest_loop_index(loops)
+            if outer_index is None:
+                continue
+            outer_loop = loops[outer_index]
+            if len(outer_loop) < 3:
+                continue
 
-        # 1. Try sketch profile (manually edited profile walls)
-        profile = self._profile_from_sketch(wall, p0, direction)
-        if profile and len(profile) >= 2:
-            return profile
+            start_d = min(d for d, _ in outer_loop)
+            end_d = max(d for d, _ in outer_loop)
+            span = end_d - start_d
+            if span < MIN_LENGTH:
+                continue
 
-        # 2. Ray-based sampling — detects gable/sloped/attached shapes
-        profile = self._profile_from_rays(wall, p0, direction,
-                                          base_z, length, bb_top)
-        if profile and len(profile) >= 2:
-            return profile
+            shifted_outer = [(d - start_d, z) for d, z in outer_loop]
+            top_profile = self._profile_from_loop_top(shifted_outer, span)
+            if not top_profile or len(top_profile) < 2:
+                continue
 
-        # 3. Flat fallback from BoundingBox
-        return [(0.0, bb_top), (length, bb_top)]
+            openings = []
+            for index, loop in enumerate(loops):
+                if index == outer_index:
+                    continue
+                opening = self._opening_from_face_loop(loop, start_d, span, base_z)
+                if opening is not None:
+                    openings.append(opening)
+            openings.sort(key=lambda item: item["left"])
 
-    def _profile_from_rays(self, wall, p0, direction, base_z, length, bb_top):
-        """Shoot vertical rays along wall length, return top Z at each."""
+            area = abs(self._loop_area_2d(outer_loop))
+            if best is None or area > best["area"]:
+                best = {
+                    "area": area,
+                    "start_d": start_d,
+                    "length": span,
+                    "top_profile": top_profile,
+                    "openings": openings,
+                }
+
+        return best
+
+    def _get_wall_side_faces(self, wall, wall_normal):
+        """Get the major interior wall side faces."""
+        faces = []
+        seen = set()
+
+        shell_layer = getattr(DB.ShellLayerType, "Interior", None)
+        if shell_layer is not None:
+            try:
+                refs = DB.HostObjectUtils.GetSideFaces(wall, shell_layer)
+            except Exception:
+                refs = []
+            for reference in refs:
+                face = self._face_from_reference(wall, reference)
+                if face is None:
+                    continue
+                self._add_unique_face(faces, seen, face)
+
+        if faces:
+            return faces
+
         try:
             opts = DB.Options()
-            opts.ComputeReferences = False
+            opts.ComputeReferences = True
             opts.DetailLevel = DB.ViewDetailLevel.Fine
-            geom_elem = wall.get_Geometry(opts)
+            geom = wall.get_Geometry(opts)
         except Exception:
-            return None
+            geom = None
 
-        solids = []
-        for gobj in geom_elem:
-            if isinstance(gobj, DB.Solid) and gobj.Volume > 0:
-                solids.append(gobj)
-            elif isinstance(gobj, DB.GeometryInstance):
+        if geom is None:
+            return faces
+
+        for geom_obj in geom:
+            solids = []
+            if hasattr(geom_obj, "Faces"):
+                solids.append(geom_obj)
+            elif hasattr(geom_obj, "GetInstanceGeometry"):
                 try:
-                    for sub in gobj.GetInstanceGeometry():
-                        if isinstance(sub, DB.Solid) and sub.Volume > 0:
-                            solids.append(sub)
+                    inst_geom = geom_obj.GetInstanceGeometry()
                 except Exception:
-                    pass
-        if not solids:
-            return None
+                    inst_geom = None
+                if inst_geom:
+                    for inst_obj in inst_geom:
+                        if hasattr(inst_obj, "Faces"):
+                            solids.append(inst_obj)
 
-        ray_top = bb_top + 5.0
-        n = max(10, int(length / 0.5))
-        profile = []
-        for i in range(n + 1):
-            d = length * i / n
-            pt = p0 + direction * d
-            try:
-                ray = DB.Line.CreateBound(
-                    DB.XYZ(pt.X, pt.Y, base_z - 1.0),
-                    DB.XYZ(pt.X, pt.Y, ray_top),
-                )
-            except Exception:
-                continue
-            max_z = base_z
             for solid in solids:
+                for face in solid.Faces:
+                    face_normal = self._face_normal(face)
+                    if face_normal is None:
+                        continue
+                    if abs(face_normal.Z) > 0.1:
+                        continue
+                    dot = face_normal.DotProduct(wall_normal)
+                    if dot > -0.8:
+                        continue
+                    self._add_unique_face(faces, seen, face)
+
+        return faces
+
+    @staticmethod
+    def _face_from_reference(wall, reference):
+        try:
+            return wall.GetGeometryObjectFromReference(reference)
+        except Exception:
+            return None
+
+    @staticmethod
+    def _add_unique_face(faces, seen, face):
+        face_id = getattr(face, "Id", None)
+        if face_id is not None:
+            try:
+                marker = getattr(face_id, "IntegerValue", getattr(face_id, "Value", face_id))
+            except Exception:
+                marker = face_id
+        else:
+            marker = id(face)
+        if marker in seen:
+            return False
+        seen.add(marker)
+        faces.append(face)
+        return True
+
+    @staticmethod
+    def _face_loops_local(face, p0, direction):
+        """Project each face loop to local wall coordinates (distance, Z)."""
+        loops = []
+        try:
+            curve_loops = face.GetEdgesAsCurveLoops()
+        except Exception:
+            curve_loops = None
+        if curve_loops is None:
+            return loops
+
+        for curve_loop in curve_loops:
+            points = []
+            for curve in curve_loop:
                 try:
-                    result = solid.IntersectWithCurve(
-                        ray, DB.SolidCurveIntersectionOptions())
-                    for si in range(result.SegmentCount):
-                        ep = result.GetCurveSegment(si).GetEndPoint(1)
-                        if ep.Z > max_z:
-                            max_z = ep.Z
+                    tess_points = curve.Tessellate()
                 except Exception:
+                    tess_points = None
+                if not tess_points:
                     continue
-            if max_z > base_z + 0.5:
-                profile.append((d, max_z))
-        return profile if len(profile) >= 2 else None
-
-    def _profile_from_sketch(self, wall, p0, direction):
-        """Extract the top profile from the wall's profile Sketch."""
-        try:
-            sketch_id = wall.SketchId
-            raw_id = getattr(sketch_id, "IntegerValue",
-                             getattr(sketch_id, "Value", -1))
-            if raw_id == -1:
-                return None
-            sketch = self.doc.GetElement(sketch_id)
-            if sketch is None:
-                return None
-        except Exception:
-            return None
-
-        # Collect all curve points from the sketch profile
-        points = []
-        try:
-            for curve_arr in sketch.Profile:
-                for curve in curve_arr:
-                    for pt in curve.Tessellate():
+                for pt in tess_points:
+                    try:
                         d = (pt - p0).DotProduct(direction)
-                        points.append((d, pt.Z))
-        except Exception:
+                    except Exception:
+                        continue
+                    candidate = (d, pt.Z)
+                    if points:
+                        prev = points[-1]
+                        if abs(prev[0] - candidate[0]) < 1e-6 and abs(prev[1] - candidate[1]) < 1e-6:
+                            continue
+                    points.append(candidate)
+            if len(points) >= 3:
+                loops.append(points)
+        return loops
+
+    @staticmethod
+    def _largest_loop_index(loops):
+        if not loops:
             return None
+        best_index = None
+        best_area = None
+        for index, loop in enumerate(loops):
+            area = abs(WallFramer._loop_area_2d(loop))
+            if best_area is None or area > best_area:
+                best_area = area
+                best_index = index
+        return best_index
 
-        if len(points) < 3:
+    def _profile_from_loop_top(self, loop_points, span):
+        """Build a top profile from a face loop's outer boundary."""
+        if not loop_points:
             return None
-
-        # Separate top half of points (above mid-height)
-        min_z = min(z for _, z in points)
-        max_z = max(z for _, z in points)
-        mid_z = (min_z + max_z) / 2.0
-
-        # Bucket by distance, keep highest Z at each position
         bucket_sz = 1.0 / 12.0
         buckets = {}
-        for d, z in points:
-            if z < mid_z:
+        for d, z in loop_points:
+            if d < -bucket_sz or d > span + bucket_sz:
                 continue
-            k = round(d / bucket_sz)
-            if k not in buckets or z > buckets[k][1]:
-                buckets[k] = (d, z)
-
+            clamped_d = max(0.0, min(span, d))
+            key = round(clamped_d / bucket_sz)
+            if key not in buckets or z > buckets[key][1]:
+                buckets[key] = (clamped_d, z)
+        if not buckets:
+            return None
         profile = sorted(buckets.values())
+        if profile[0][0] > 1e-6:
+            profile.insert(0, (0.0, profile[0][1]))
+        if profile[-1][0] < span - 1e-6:
+            profile.append((span, profile[-1][1]))
+        profile = self._simplify_profile(profile)
         return profile if len(profile) >= 2 else None
+
+    def _opening_from_face_loop(self, loop_points, start_d, span, base_z):
+        """Convert an inner face loop into an opening record."""
+        if not loop_points:
+            return None
+        left = min(d for d, _ in loop_points) - start_d
+        right = max(d for d, _ in loop_points) - start_d
+        sill_z = min(z for _, z in loop_points)
+        head_z = max(z for _, z in loop_points)
+
+        left = max(0.0, left)
+        right = min(span, right)
+        edge_tol = STUD_THICKNESS * 2.0
+        if left <= edge_tol or right >= span - edge_tol:
+            return None
+        if right - left < 0.5 or head_z - sill_z < 0.5:
+            return None
+        return {
+            "left": left,
+            "right": right,
+            "head_z": head_z,
+            "sill_z": sill_z,
+            "is_window": sill_z > base_z + PLATE_THICKNESS,
+        }
+
+    @staticmethod
+    def _merge_opening_sets(primary, secondary):
+        """Merge two opening lists while removing near-duplicate spans."""
+        merged = []
+        for source in (primary or [], secondary or []):
+            for opening in source:
+                is_dup = False
+                for existing in merged:
+                    if (abs(existing["left"] - opening["left"]) < STUD_THICKNESS and
+                            abs(existing["right"] - opening["right"]) < STUD_THICKNESS and
+                            abs(existing["head_z"] - opening["head_z"]) < STUD_THICKNESS):
+                        is_dup = True
+                        break
+                if not is_dup:
+                    merged.append(dict(opening))
+        merged.sort(key=lambda item: item["left"])
+        return merged
+
+    @staticmethod
+    def _loop_area_2d(loop_points):
+        if not loop_points:
+            return 0.0
+        points = list(loop_points)
+        if len(points) < 3:
+            return 0.0
+        area = 0.0
+        for index in range(len(points)):
+            x0, y0 = points[index]
+            x1, y1 = points[(index + 1) % len(points)]
+            area += (x0 * y1) - (x1 * y0)
+        return area * 0.5
+
+    @staticmethod
+    def _face_normal(face):
+        try:
+            bbox = face.GetBoundingBox()
+            if bbox is None:
+                return None
+            uv = DB.UV(
+                (bbox.Min.U + bbox.Max.U) * 0.5,
+                (bbox.Min.V + bbox.Max.V) * 0.5,
+            )
+            normal = face.ComputeNormal(uv)
+            if normal is None:
+                return None
+            return normal.Normalize()
+        except Exception:
+            return None
+
+    @staticmethod
+    def _trim_openings_to_span(openings, start_d, end_d):
+        """Shift/clamp opening distances into a trimmed wall run."""
+        span = max(0.0, end_d - start_d)
+        trimmed = []
+        for opening in openings or []:
+            left = opening["left"] - start_d
+            right = opening["right"] - start_d
+            if right <= 0.0 or left >= span:
+                continue
+
+            clipped = dict(opening)
+            clipped["left"] = max(0.0, left)
+            clipped["right"] = min(span, right)
+            if clipped["right"] - clipped["left"] < MIN_LENGTH:
+                continue
+            trimmed.append(clipped)
+
+        trimmed.sort(key=lambda item: item["left"])
+        return trimmed
 
     @staticmethod
     def _simplify_profile(profile, tol=1.0 / 12.0):
@@ -1413,82 +1452,6 @@ class WallFramer(object):
                 t = (d - d0) / (d1 - d0) if abs(d1 - d0) > 1e-9 else 0.0
                 return z0 + t * (z1 - z0)
         return profile[-1][1]
-
-    def _physical_end_distances(self, wall, p0, direction, length, sample_z):
-        """Get physical wall run limits from 3D solid intersections.
-
-        Casts a horizontal ray along the framing line at stud-zone height.
-        This avoids relying on wall location-curve endpoints when walls join.
-        """
-        try:
-            opts = DB.Options()
-            opts.ComputeReferences = False
-            opts.DetailLevel = DB.ViewDetailLevel.Fine
-            geom_elem = wall.get_Geometry(opts)
-        except Exception:
-            return (0.0, length)
-
-        solids = []
-        for gobj in geom_elem:
-            if isinstance(gobj, DB.Solid) and gobj.Volume > 0:
-                solids.append(gobj)
-            elif isinstance(gobj, DB.GeometryInstance):
-                try:
-                    for sub in gobj.GetInstanceGeometry():
-                        if isinstance(sub, DB.Solid) and sub.Volume > 0:
-                            solids.append(sub)
-                except Exception:
-                    pass
-        if not solids:
-            return (0.0, length)
-
-        z_shift = sample_z - p0.Z
-        ray_origin = p0 + DB.XYZ(0, 0, z_shift)
-        ray_pad = max(2.0, length * 0.25, STUD_THICKNESS * 8.0)
-        ray_start = ray_origin - direction * ray_pad
-        ray_end = ray_origin + direction * (length + ray_pad)
-
-        try:
-            ray = DB.Line.CreateBound(ray_start, ray_end)
-        except Exception:
-            return (0.0, length)
-
-        hit_min = None
-        hit_max = None
-        for solid in solids:
-            try:
-                result = solid.IntersectWithCurve(
-                    ray, DB.SolidCurveIntersectionOptions())
-            except Exception:
-                continue
-            try:
-                seg_count = result.SegmentCount
-            except Exception:
-                seg_count = 0
-            for si in range(seg_count):
-                try:
-                    seg = result.GetCurveSegment(si)
-                    p_a = seg.GetEndPoint(0)
-                    p_b = seg.GetEndPoint(1)
-                except Exception:
-                    continue
-                d_a = (p_a - p0).DotProduct(direction)
-                d_b = (p_b - p0).DotProduct(direction)
-                lo = min(d_a, d_b)
-                hi = max(d_a, d_b)
-                if hit_min is None or lo < hit_min:
-                    hit_min = lo
-                if hit_max is None or hi > hit_max:
-                    hit_max = hi
-
-        if hit_min is None or hit_max is None:
-            return (0.0, length)
-
-        min_d = max(0.0, min(length, hit_min))
-        max_d = max(0.0, min(length, hit_max))
-        if max_d - min_d < MIN_LENGTH:
-            return (0.0, length)
-        return (min_d, max_d)
 
 
 # =========================================================================
@@ -1738,6 +1701,61 @@ def _support_top_elevation(element):
     return None
 
 
+def _delete_existing_wall_framing(doc, walls):
+    """Delete tracked framing previously generated for the selected walls."""
+    wall_ids = set()
+    for wall in walls or []:
+        wall_id = _element_id_text(getattr(wall, "Id", None))
+        if wall_id:
+            wall_ids.add(wall_id)
+    if not wall_ids:
+        return 0
+
+    delete_ids = []
+    for category in (
+        DB.BuiltInCategory.OST_StructuralFraming,
+        DB.BuiltInCategory.OST_StructuralColumns,
+    ):
+        try:
+            collector = (
+                DB.FilteredElementCollector(doc)
+                .OfCategory(category)
+                .WhereElementIsNotElementType()
+            )
+        except Exception:
+            continue
+        for element in collector:
+            try:
+                tracking = get_tracking_data(element)
+            except Exception:
+                tracking = None
+            if not tracking:
+                continue
+            if tracking.get("kind") != "wall":
+                continue
+            if tracking.get("host") not in wall_ids:
+                continue
+            delete_ids.append(element.Id)
+
+    deleted = 0
+    for element_id in delete_ids:
+        try:
+            doc.Delete(element_id)
+            deleted += 1
+        except Exception:
+            pass
+    return deleted
+
+
+def _element_id_text(element_id):
+    if element_id is None:
+        return None
+    value = getattr(element_id, "IntegerValue", getattr(element_id, "Value", None))
+    if value is None:
+        return None
+    return str(value)
+
+
 def main():
     doc = revit.doc
 
@@ -1803,6 +1821,7 @@ def main():
 
     framer = WallFramer(doc, config)
     total = 0
+    deleted_existing = 0
     with revit.Transaction("WF: Frame Walls"):
         try:
             ensure_bom_parameters(doc)
@@ -1812,14 +1831,22 @@ def main():
                     bom_param_err
                 )
             )
+        deleted_existing = _delete_existing_wall_framing(doc, walls)
         for wall in walls:
             if framer.frame_wall(wall):
                 total += 1
 
     output.print_md(
         "## Wood Framing Complete\n"
-        "- **Walls framed:** {0}\n"
-        "- **Members placed:** {1}\n".format(total, len(framer.placed))
+        "- **Engine:** {0}\n"
+        "- **Walls framed:** {1}\n"
+        "- **Existing tracked members deleted:** {2}\n"
+        "- **Members placed:** {3}\n".format(
+            FRAME_WALL_ENGINE,
+            total,
+            deleted_existing,
+            len(framer.placed),
+        )
     )
 
 

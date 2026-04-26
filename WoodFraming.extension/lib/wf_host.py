@@ -147,18 +147,18 @@ def analyze_wall_host(doc, wall, config):
     target_layer = _select_target_layer(layers, mode)
     target_layer = _preferred_wall_target_layer(layers, mode, target_layer)
 
-    # Shift from Location.Curve (at wall center) to core centerline.
-    # GetOffsetForLocationLine(CoreCenterline) returns the offset from the
-    # compound structure center (= wall center) to core center.
+    # Shift from the wall's actual Location.Curve line to the selected
+    # framing layer. The wall location line may be a finish face.
     # Apply this directly — do NOT subtract the current location line offset.
-    core_shift = 0.0
+    # The target offset below subtracts the current location-line offset.
+    target_shift = 0.0
     if compound is not None:
-        from Autodesk.Revit.DB import WallLocationLine
         try:
-            core_shift = compound.GetOffsetForLocationLine(
-                WallLocationLine.CoreCenterline)
+            current_offset = compound.GetOffsetForLocationLine(
+                wall_info.location_line)
+            target_shift = target_layer.center_offset - current_offset
         except Exception:
-            core_shift = 0.0
+            target_shift = wall_info.core_centerline_offset
 
     info = WallHostInfo()
     info.kind = HostKind.WALL
@@ -183,7 +183,7 @@ def analyze_wall_host(doc, wall, config):
     info.current_location_line_offset = 0.0
     info.layers = layers
     info.target_layer = target_layer
-    info.target_layer_offset = core_shift
+    info.target_layer_offset = target_shift
     info.openings = find_openings(doc, wall, wall_info)
 
     # Optional override: frame wall from selected support-host top elevation.
