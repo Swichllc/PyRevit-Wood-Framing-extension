@@ -351,6 +351,50 @@ def _audit_line(audit, placed_count):
     )
 
 
+def _audit_text(value, limit):
+    text = str(value or "")
+    text = text.replace("|", "/").replace("\n", " ")
+    if len(text) > limit:
+        return text[:max(0, limit - 3)] + "..."
+    return text
+
+
+def _side_stud_attempt_summary(audit):
+    attempts = audit.get("side_stud_attempts") or []
+    parts = []
+    for attempt in attempts[:6]:
+        try:
+            raw_d = float(attempt.get("raw_d") or 0.0)
+            stud_d = float(attempt.get("stud_d") or 0.0)
+        except Exception:
+            raw_d = 0.0
+            stud_d = 0.0
+        result = attempt.get("result") or "?"
+        label = "{0:.3f}->{1:.3f} {2}".format(raw_d, stud_d, result)
+        reason = attempt.get("reason") or ""
+        if reason:
+            label = "{0} ({1})".format(label, reason)
+        parts.append(label)
+    if len(attempts) > 6:
+        parts.append("+{0} more".format(len(attempts) - 6))
+    return _audit_text("; ".join(parts), 120)
+
+
+def _side_stud_audit_line(audit):
+    wall_id = audit.get("wall_id", "?")
+    return (
+        "| {0} | {1} | {2} | {3} | {4} | {5} |\n"
+        .format(
+            wall_id,
+            audit.get("side_segment_count", 0),
+            audit.get("side_stud_attempted_count", 0),
+            audit.get("side_stud_placed_count", 0),
+            audit.get("side_stud_rejected_count", 0),
+            _side_stud_attempt_summary(audit),
+        )
+    )
+
+
 def _element_id_text(element_id):
     if element_id is None:
         return None
@@ -431,6 +475,14 @@ def main():
     for audit, placed_count in audit_rows:
         audit_table += _audit_line(audit, placed_count)
 
+    side_stud_table = (
+        "\n### Side Stud Audit\n"
+        "| Wall Id | Side Segs | Attempted | Placed | Rejected | Attempts |\n"
+        "| --- | ---: | ---: | ---: | ---: | --- |\n"
+    )
+    for audit, _placed_count in audit_rows:
+        side_stud_table += _side_stud_audit_line(audit)
+
     deleted_total = (
         deleted_counts.get("wall_v4", 0)
         + deleted_counts.get("wall_v2", 0)
@@ -444,13 +496,15 @@ def main():
         "- **Walls skipped:** {2}\n"
         "- **Previous members replaced:** {3}\n"
         "- **Members placed:** {4}\n"
-        "{5}".format(
+        "{5}"
+        "{6}".format(
             ENGINE_NAME,
             wall_count,
             skipped,
             deleted_total,
             member_count,
             audit_table,
+            side_stud_table,
         )
     )
 

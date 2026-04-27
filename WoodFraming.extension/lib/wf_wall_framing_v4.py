@@ -311,6 +311,11 @@ class WallCavityFramingV4Engine(BaseFramingEngine):
             "hosted_opening_count": len(hosted_openings),
             "merged_opening_count": len(openings),
             "perimeter_segment_count": len(perimeter_segments),
+            "side_segment_count": len([segment for segment in perimeter_segments if segment.kind == "side"]),
+            "side_stud_attempted_count": 0,
+            "side_stud_placed_count": 0,
+            "side_stud_rejected_count": 0,
+            "side_stud_attempts": [],
             "target_depth": target_depth,
             "target_offset_from_face": target_offset,
             "target_layer_label": target_label,
@@ -694,10 +699,19 @@ class WallCavityFramingV4Engine(BaseFramingEngine):
 
     def _side_studs(self, host, occupied):
         members = []
-        for segment in _segments_by_kind(host, "side"):
-            d = _side_stud_position(host, (segment.d0 + segment.d1) * 0.5)
+        side_segments = _segments_by_kind(host, "side")
+        host.audit["side_segment_count"] = len(side_segments)
+        host.audit["side_stud_attempted_count"] = 0
+        host.audit["side_stud_placed_count"] = 0
+        host.audit["side_stud_rejected_count"] = 0
+        host.audit["side_stud_attempts"] = []
+        for segment in side_segments:
+            raw_d = (segment.d0 + segment.d1) * 0.5
+            d = _side_stud_position(host, raw_d)
             low_z = min(segment.z0, segment.z1) + self._stud_bottom()
             high_z = max(segment.z0, segment.z1) - self._top_plate_stack()
+            attempt = self._record_side_stud_attempt(host, segment, raw_d, d)
+            candidate_count = host.audit.get("candidate_count", 0)
             member = self._vertical_member_at_d(
                 host,
                 "SIDE_STUD",
@@ -709,7 +723,72 @@ class WallCavityFramingV4Engine(BaseFramingEngine):
             if member is not None:
                 members.append(member)
                 occupied.add(round(d, 4))
+                host.audit["side_stud_placed_count"] = (
+                    host.audit.get("side_stud_placed_count", 0) + 1
+                )
+                self._finish_side_stud_attempt(attempt, "placed", None)
+            else:
+                host.audit["side_stud_rejected_count"] = (
+                    host.audit.get("side_stud_rejected_count", 0) + 1
+                )
+                reason = self._side_stud_failure_reason(
+                    host,
+                    d,
+                    low_z,
+                    high_z,
+                    candidate_count,
+                )
+                self._finish_side_stud_attempt(attempt, "rejected", reason)
         return members
+
+    def _record_side_stud_attempt(self, host, segment, raw_d, stud_d):
+        host.audit["side_stud_attempted_count"] = (
+            host.audit.get("side_stud_attempted_count", 0) + 1
+        )
+        attempts = host.audit.setdefault("side_stud_attempts", [])
+        attempt = {
+            "raw_d": raw_d,
+            "stud_d": stud_d,
+            "z0": min(segment.z0, segment.z1),
+            "z1": max(segment.z0, segment.z1),
+            "result": "pending",
+            "reason": "",
+        }
+        if len(attempts) < 8:
+            attempts.append(attempt)
+        return attempt
+
+    @staticmethod
+    def _finish_side_stud_attempt(attempt, result, reason):
+        if attempt is None:
+            return
+        attempt["result"] = result
+        attempt["reason"] = reason or ""
+
+    def _side_stud_failure_reason(self, host, d, bottom_abs_z, top_abs_z,
+                                  candidate_count_before):
+        rejection = host.audit.get("_last_validation_rejection")
+        if rejection:
+            if (rejection.get("member_type") == "SIDE_STUD" and
+                    rejection.get("candidate_index", 0) > candidate_count_before):
+                return rejection.get("reason") or "validation rejected side stud"
+
+        intervals = _vertical_intervals(host.outer_loop, [], d)
+        if not intervals:
+            return "no vertical interval at side stud d"
+
+        best_height = 0.0
+        for low, high in intervals:
+            framed_low = low + self._stud_bottom()
+            framed_high = high - self._top_plate_stack()
+            if bottom_abs_z is not None:
+                framed_low = max(framed_low, bottom_abs_z)
+            if top_abs_z is not None:
+                framed_high = min(framed_high, top_abs_z)
+            best_height = max(best_height, framed_high - framed_low)
+        if best_height < MIN_MEMBER_LENGTH:
+            return "no usable vertical span at side stud d"
+        return "member factory returned no side stud"
 
     def _opening_members(self, host, occupied):
         members = []
@@ -1067,6 +1146,11 @@ class WallCavityFramingV4Engine(BaseFramingEngine):
             host.audit["validated_count"] = host.audit.get("validated_count", 0) + 1
             return member
         host.audit["rejected_count"] = host.audit.get("rejected_count", 0) + 1
+        host.audit["_last_validation_rejection"] = {
+            "member_type": member.member_type,
+            "reason": reason,
+            "candidate_index": host.audit.get("candidate_count", 0),
+        }
         if not host.audit.get("first_rejection"):
             host.audit["first_rejection"] = reason
         if len(host.rejections) < 12:
