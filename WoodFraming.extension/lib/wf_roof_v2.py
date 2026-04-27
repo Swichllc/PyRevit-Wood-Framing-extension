@@ -15,6 +15,7 @@ from wf_geometry import FramingMember, inches_to_feet
 from wf_host import analyze_roof_host, _scanline_intervals
 from wf_placement import BaseFramingEngine
 from wf_schedule_utils import apply_bom_metadata
+from wf_tracking import tag_instance
 
 
 FLAT_THRESHOLD = 0.9998
@@ -1652,6 +1653,10 @@ class RoofFramingEngineV2(BaseFramingEngine):
 
             # Drop the system from the roof finish plane down to the top of the structural target layer.
             _set_beam_system_elevation(bs, -_resolve_roof_layer_top_depth(plane))
+            try:
+                tag_instance(bs, host_info, member)
+            except Exception:
+                pass
 
             placed_elements.append(bs)
 
@@ -1671,6 +1676,16 @@ class RoofFramingEngineV2(BaseFramingEngine):
                     except Exception:
                         pass
 
+                try:
+                    tag_instance(r, host_info, member)
+                except Exception:
+                    pass
+
+                try:
+                    apply_bom_metadata(r, host_info, "RAFTER")
+                except Exception:
+                    pass
+
                 add_coping = getattr(r, "AddCoping", None)
                 if add_coping is None:
                     placed_elements.append(r)
@@ -1683,11 +1698,6 @@ class RoofFramingEngineV2(BaseFramingEngine):
                         add_coping(rb_inst)
                     except Exception:
                         pass
-
-                try:
-                    apply_bom_metadata(r, host_info, "RAFTER")
-                except Exception:
-                    pass
 
                 placed_elements.append(r)
 

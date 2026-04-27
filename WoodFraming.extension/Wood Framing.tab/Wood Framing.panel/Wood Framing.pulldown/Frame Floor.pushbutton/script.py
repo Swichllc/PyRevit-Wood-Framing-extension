@@ -24,6 +24,7 @@ from Autodesk.Revit.UI.Selection import ObjectType, ISelectionFilter
 from wf_config import FramingConfig, SPACING_16OC, SPACING_24OC
 from wf_families import get_available_types_flat, parse_family_type_label
 from wf_floor import FloorFramingEngine
+from wf_tracking import delete_tracked_members_for_hosts
 
 logger = script.get_logger()
 output = script.get_output()
@@ -195,8 +196,14 @@ def main():
     engine = FloorFramingEngine(doc, config)
     total_placed = 0
     total_floors = 0
+    deleted_existing = 0
 
     with revit.Transaction("WF: Frame Floors"):
+        deleted_existing = delete_tracked_members_for_hosts(
+            doc,
+            floors,
+            ("floor",),
+        )
         for floor in floors:
             members, floor_info = engine.calculate_members(floor)
             if floor_info is None:
@@ -209,7 +216,12 @@ def main():
     output.print_md(
         "## Floor Framing Complete\n"
         "- **Floors framed:** {0}\n"
-        "- **Members placed:** {1}".format(total_floors, total_placed)
+        "- **Previous members replaced:** {1}\n"
+        "- **Members placed:** {2}".format(
+            total_floors,
+            deleted_existing,
+            total_placed,
+        )
     )
 
 

@@ -1160,8 +1160,11 @@ class WallCavityFramingV4Engine(BaseFramingEngine):
     def _member_inside_wall_solid(self, host, member):
         if not host.wall_solids:
             return False, "no wall solid"
-        if getattr(member, "member_type", None) in OPENING_FRAME_MEMBER_TYPES:
+        member_type = getattr(member, "member_type", None)
+        if member_type in OPENING_FRAME_MEMBER_TYPES:
             return self._opening_frame_member_inside_wall_solid(host, member)
+        if member_type == "SIDE_STUD":
+            return self._side_stud_member_inside_wall_solid(host, member)
         lines = self._validation_sample_lines(host, member)
         if not lines:
             return False, "no sample lines"
@@ -1187,6 +1190,26 @@ class WallCavityFramingV4Engine(BaseFramingEngine):
                 failed += 1
         if failed > max(4, len(edge_lines) - 3):
             return False, "opening frame mostly outside wall solid"
+        return True, None
+
+    def _side_stud_member_inside_wall_solid(self, host, member):
+        start = member.start_point
+        end = member.end_point
+        if start is None or end is None:
+            return False, "missing member endpoints"
+        if not _line_inside_any_solid(host.wall_solids, start, end):
+            return False, "side stud centerline outside wall solid"
+
+        lines = self._validation_sample_lines(host, member)
+        if not lines:
+            return True, None
+
+        failed = 0
+        for sample_start, sample_end in lines:
+            if not _line_inside_any_solid(host.wall_solids, sample_start, sample_end):
+                failed += 1
+        if failed > len(lines) // 2:
+            return False, "side stud mostly outside wall solid"
         return True, None
 
     def _validation_sample_lines(self, host, member):

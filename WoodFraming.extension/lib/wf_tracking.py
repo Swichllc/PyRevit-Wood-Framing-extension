@@ -73,6 +73,67 @@ def get_tracked_members_for_hosts(doc, hosts):
     return matches
 
 
+def delete_tracked_members_for_hosts(doc, hosts, allowed_kinds=None):
+    """Delete tracked generated members owned by the given host elements."""
+    from Autodesk.Revit.DB import BuiltInCategory, FilteredElementCollector
+
+    host_keys = set()
+    for host in hosts:
+        host_key = host_key_for_element(host)
+        if host_key is not None:
+            host_keys.add(host_key)
+
+    if not host_keys:
+        return 0
+
+    if allowed_kinds is not None:
+        allowed_kinds = set(allowed_kinds)
+        host_keys = set(
+            key for key in host_keys
+            if key[0] in allowed_kinds
+        )
+        if not host_keys:
+            return 0
+
+    delete_ids = []
+    seen_ids = set()
+    for category in _tracked_delete_categories(BuiltInCategory):
+        try:
+            collector = (
+                FilteredElementCollector(doc)
+                .OfCategory(category)
+                .WhereElementIsNotElementType()
+            )
+        except Exception:
+            continue
+
+        for element in collector:
+            tracking = get_tracking_data(element)
+            if tracking is None:
+                continue
+            key = tracking.get("kind"), tracking.get("host")
+            if key not in host_keys:
+                continue
+
+            element_id = getattr(element, "Id", None)
+            if element_id is None:
+                continue
+            id_value = _element_id_value(element_id)
+            if id_value in seen_ids:
+                continue
+            seen_ids.add(id_value)
+            delete_ids.append(element_id)
+
+    deleted = 0
+    for element_id in delete_ids:
+        try:
+            doc.Delete(element_id)
+            deleted += 1
+        except Exception:
+            pass
+    return deleted
+
+
 def host_key_for_element(element):
     """Return the tracking key for a selected host element."""
     from Autodesk.Revit.DB import BuiltInCategory, Floor, RoofBase, Wall
@@ -163,10 +224,39 @@ def _category_matches(element, category_id):
     return current_id == target_id
 
 
+def _tracked_delete_categories(built_in_category):
+    """Return categories that can contain generated framing elements."""
+    names = (
+        "OST_StructuralFraming",
+        "OST_StructuralColumns",
+        "OST_StructuralFramingSystem",
+        "OST_StructuralFramingSystems",
+    )
+    categories = []
+    seen = set()
+    for name in names:
+        category = getattr(built_in_category, name, None)
+        if category is None:
+            continue
+        try:
+            key = int(category)
+        except Exception:
+            key = name
+        if key in seen:
+            continue
+        seen.add(key)
+        categories.append(category)
+    return categories
+
+
 def _element_id_value(element_id):
     """Return a numeric id for an ElementId or raw integer."""
     if element_id is None:
         return None
-    if isinstance(element_id, (int, long)):
+    try:
+        integer_types = (int, long)
+    except NameError:
+        integer_types = (int,)
+    if isinstance(element_id, integer_types):
         return element_id
     return getattr(element_id, "IntegerValue", getattr(element_id, "Value", None))

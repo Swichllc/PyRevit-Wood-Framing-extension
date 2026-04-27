@@ -24,6 +24,7 @@ from Autodesk.Revit.UI.Selection import ObjectType, ISelectionFilter
 from wf_config import FramingConfig, SPACING_16OC, SPACING_24OC
 from wf_families import get_available_types_flat, parse_family_type_label
 from wf_roof import RoofFramingEngine
+from wf_tracking import delete_tracked_members_for_hosts
 
 
 output = script.get_output()
@@ -188,9 +189,15 @@ def main():
     total_calculated = 0
     total_roofs = 0
     skipped_roofs = 0
+    deleted_existing = 0
     errors = []
 
     with revit.Transaction("WF: Frame Single-Slope Roofs"):
+        deleted_existing = delete_tracked_members_for_hosts(
+            doc,
+            roofs,
+            ("roof",),
+        )
         for roof in roofs:
             try:
                 members, roof_info = engine.calculate_members(roof, mode="stick")
@@ -249,10 +256,12 @@ def main():
         "## Single-Slope Roof Framing Complete\n"
         "- **Roofs framed:** {0}\n"
         "- **Roofs skipped:** {1}\n"
-        "- **Members calculated:** {2}\n"
-        "- **Members placed:** {3}".format(
+        "- **Previous members replaced:** {2}\n"
+        "- **Members calculated:** {3}\n"
+        "- **Members placed:** {4}".format(
             total_roofs,
             skipped_roofs,
+            deleted_existing,
             total_calculated,
             total_placed,
         )

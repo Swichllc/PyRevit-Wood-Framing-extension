@@ -37,6 +37,7 @@ from wf_config import (
 )
 from wf_families import get_available_types_flat, parse_family_type_label
 from wf_ceiling import CeilingFramingEngine
+from wf_tracking import delete_tracked_members_for_hosts
 
 logger = script.get_logger()
 output = script.get_output()
@@ -246,8 +247,14 @@ def main():
     engine = CeilingFramingEngine(doc, cfg)
     total_placed = 0
     total_ceilings = 0
+    deleted_existing = 0
 
     with revit.Transaction("WF: Frame Ceilings"):
+        deleted_existing = delete_tracked_members_for_hosts(
+            doc,
+            ceilings,
+            ("ceiling",),
+        )
         for ceiling in ceilings:
             members, ceiling_info = engine.calculate_members(ceiling)
             if ceiling_info is None:
@@ -262,10 +269,12 @@ def main():
     output.print_md(
         "## Ceiling Framing Complete\n"
         "- **Ceilings framed:** {0}\n"
-        "- **Members placed:** {1}\n"
-        "- **Joist direction:** {2}\n"
-        "- **Placement:** {3}".format(
+        "- **Previous members replaced:** {1}\n"
+        "- **Members placed:** {2}\n"
+        "- **Joist direction:** {3}\n"
+        "- **Placement:** {4}".format(
             total_ceilings,
+            deleted_existing,
             total_placed,
             getattr(cfg, "ceiling_direction_mode", CEILING_DIRECTION_AUTO),
             getattr(cfg, "ceiling_placement_mode", CEILING_PLACEMENT_ABOVE),

@@ -24,6 +24,7 @@ from Autodesk.Revit.UI.Selection import ObjectType, ISelectionFilter
 from wf_config import FramingConfig, SPACING_16OC, SPACING_24OC
 from wf_families import get_available_types_flat, parse_family_type_label
 from wf_roof_v2 import RoofFramingEngineV2, _placement_fields_for_plan, V2_BUILD_TAG
+from wf_tracking import delete_tracked_members_for_hosts
 
 
 output = script.get_output()
@@ -236,9 +237,15 @@ def main():
     total_members = 0
     total_placed = 0
     skipped = 0
+    deleted_existing = 0
     errors = []
 
     with revit.Transaction("WF: Frame Multi-Slope Roof"):
+        deleted_existing = delete_tracked_members_for_hosts(
+            doc,
+            roofs,
+            ("roof",),
+        )
         for roof in roofs:
             roof_id = _roof_id(roof)
             try:
@@ -306,10 +313,12 @@ def main():
         "## Frame Multi-Slope Roof Complete\n"
         "- **Roofs framed:** {0}\n"
         "- **Roofs skipped:** {1}\n"
-        "- **Members generated:** {2}\n"
-        "- **Members placed:** {3}".format(
+        "- **Previous members replaced:** {2}\n"
+        "- **Members generated:** {3}\n"
+        "- **Members placed:** {4}".format(
             total_roofs,
             skipped,
+            deleted_existing,
             total_members,
             total_placed,
         )
