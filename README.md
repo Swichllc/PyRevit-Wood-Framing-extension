@@ -79,11 +79,7 @@ Use this option when you want to keep the repo in place and have pyRevit load it
 2. In Revit, open pyRevit settings.
 3. Add the parent folder that contains `WoodFraming.extension` to the custom extension directories list.
 
-   For this checkout, add:
-
-   ```text
-   d:\Temp projects\009 - wood framing
-   ```
+   To complete this checkout, utilize the file explorer to identify and choose the directory where the folder was previously saved.
 
    Do not add the `WoodFraming.extension` folder itself. Add the folder that contains it.
 
