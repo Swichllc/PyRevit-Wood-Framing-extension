@@ -1313,6 +1313,7 @@ class RoofFramingEngine(BaseFramingEngine):
         if side_axis is None or distance <= 1e-9:
             return None
 
+        original_length = _dist(start_point, end_point)
         best_segment = None
         best_length = -1.0
         for sign in (-1.0, 1.0):
@@ -1323,6 +1324,8 @@ class RoofFramingEngine(BaseFramingEngine):
             if clipped is None:
                 continue
             seg_length = _dist(clipped[0], clipped[1])
+            if seg_length > original_length + PROFILE_MATCH_TOL:
+                continue
             if seg_length > best_length + 1e-6:
                 best_segment = clipped
                 best_length = seg_length
@@ -1594,7 +1597,13 @@ class RoofFramingEngine(BaseFramingEngine):
         rotation = 0.0
         offset = None
 
-        extra_depth = max(0.0, layer_top_depth - max(0.0, edge_depth))
+        source_depth = self._edge_depth_from_roof_face(
+            plane,
+            start_point,
+            end_point,
+            edge_depth,
+        )
+        extra_depth = max(0.0, layer_top_depth - source_depth)
         if roof_normal is not None and extra_depth > 0.0:
             offset = roof_normal.Multiply(-extra_depth)
 
@@ -1643,9 +1652,12 @@ class RoofFramingEngine(BaseFramingEngine):
             start_point = start_point + offset
             end_point = end_point + offset
 
+        original_length = _dist(start_point, end_point)
         clipped = self._clip_member_axis_to_roof(roof_info.element, start_point, end_point)
         if clipped is not None:
-            start_point, end_point = clipped
+            clipped_length = _dist(clipped[0], clipped[1])
+            if clipped_length <= original_length + PROFILE_MATCH_TOL:
+                start_point, end_point = clipped
         if _dist(start_point, end_point) < MIN_MEMBER_LENGTH:
             return None
 
@@ -1659,15 +1671,54 @@ class RoofFramingEngine(BaseFramingEngine):
         return member
 
     @staticmethod
+    def _edge_depth_from_roof_face(plane, start_point, end_point, fallback_depth):
+        """Return average edge depth from the roof exterior face."""
+        normal = getattr(plane, "normal", None)
+        normal = _normalize(normal) if normal is not None else None
+        if normal is None:
+            return max(0.0, float(fallback_depth or 0.0))
+        try:
+            start_depth = -(start_point - plane.origin).DotProduct(normal)
+            end_depth = -(end_point - plane.origin).DotProduct(normal)
+            return max(0.0, (float(start_depth) + float(end_depth)) * 0.5)
+        except Exception:
+            return max(0.0, float(fallback_depth or 0.0))
+
+    @staticmethod
     def _resolve_roof_layer_top_depth(plane):
         """Return the depth from roof exterior to the top of the target layer."""
-        target_layer = getattr(plane, "target_layer", None)
+        target_layer = RoofFramingEngine._preferred_roof_structural_layer(plane)
         if target_layer is None:
             return 0.0
         try:
             return max(0.0, float(getattr(target_layer, "start_depth", 0.0)))
         except Exception:
             return 0.0
+
+    @staticmethod
+    def _preferred_roof_structural_layer(plane):
+        """Prefer a physical roof structure layer over a virtual core fallback."""
+        target_layer = getattr(plane, "target_layer", None)
+        if (RoofFramingEngine._layer_is_roof_structure(target_layer)
+                and not getattr(target_layer, "is_virtual", False)):
+            return target_layer
+
+        for layer in getattr(plane, "layers", []) or []:
+            if getattr(layer, "is_virtual", False):
+                continue
+            if RoofFramingEngine._layer_is_roof_structure(layer):
+                return layer
+
+        return target_layer
+
+    @staticmethod
+    def _layer_is_roof_structure(layer):
+        if layer is None:
+            return False
+        if bool(getattr(layer, "is_structural", False)):
+            return True
+        function = str(getattr(layer, "function", "") or "").lower()
+        return "struct" in function
 
     def _resolve_roof_member_size(self, family_name, type_name):
         """Resolve member thickness and depth from the type or nominal size."""
