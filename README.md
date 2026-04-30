@@ -8,7 +8,7 @@ This repository contains one pyRevit extension folder:
 WoodFraming.extension/
 ```
 
-When loaded in Revit, the extension adds a `Wood Framing` tab with a `Wood Framing` panel and `Wood Framing` pulldown.
+When loaded in Revit, the extension adds a `Wood Framing` tab with a `Wood Framing` panel and `Material Takeoffs` panel.
 
 ## Current status
 
