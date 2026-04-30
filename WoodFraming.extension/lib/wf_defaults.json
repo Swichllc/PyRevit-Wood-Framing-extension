@@ -10,6 +10,8 @@
   "top_plate_type_name": "2x6", 
   "top_plate_count": 2, 
   "include_corner_studs": true, 
+  "wall_join_corner_style": "corner_insulated",
+  "wall_join_t_style": "t_assembly",
   "include_king_studs": false, 
   "include_mid_plates": true,
   "mid_plate_interval_ft": 8.0,

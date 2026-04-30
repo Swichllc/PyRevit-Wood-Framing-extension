@@ -1,7 +1,7 @@
 title: Wall Join Cleanup
 tooltip: >-
-  Clean up generated studs near a selected two-wall corner or T intersection
-  and place a selected join assembly.
+  Replace previous join assembly members near a selected two-wall corner or
+  T intersection and place a selected join assembly.
 author: Roi Hason @ Swich Design
 context:
   any:

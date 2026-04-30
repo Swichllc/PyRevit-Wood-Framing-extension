@@ -1,12 +1,13 @@
 <Window xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
         xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
         Title="Wall Framing"
-        Height="560" Width="560"
+        Height="620" Width="560"
         WindowStartupLocation="CenterScreen"
         ResizeMode="NoResize"
         ShowInTaskbar="False">
     <Grid Margin="12">
         <Grid.RowDefinitions>
+            <RowDefinition Height="Auto"/>
             <RowDefinition Height="Auto"/>
             <RowDefinition Height="Auto"/>
             <RowDefinition Height="Auto"/>
@@ -92,16 +93,39 @@
         </StackPanel>
 
         <TextBlock Grid.Row="8" Grid.Column="0"
+                   Text="Join Assemblies:" VerticalAlignment="Top" Margin="0,8"/>
+        <Grid Grid.Row="8" Grid.Column="1" Margin="0,8">
+            <Grid.RowDefinitions>
+                <RowDefinition Height="Auto"/>
+                <RowDefinition Height="Auto"/>
+            </Grid.RowDefinitions>
+            <Grid.ColumnDefinitions>
+                <ColumnDefinition Width="70"/>
+                <ColumnDefinition Width="*"/>
+            </Grid.ColumnDefinitions>
+            <TextBlock Grid.Row="0" Grid.Column="0"
+                       Text="Corners:" VerticalAlignment="Center" Margin="0,0,6,4"/>
+            <ComboBox Grid.Row="0" Grid.Column="1"
+                      x:Name="cb_corner_assembly" Margin="0,0,0,4"
+                      IsEditable="False"/>
+            <TextBlock Grid.Row="1" Grid.Column="0"
+                       Text="T walls:" VerticalAlignment="Center" Margin="0,4,6,0"/>
+            <ComboBox Grid.Row="1" Grid.Column="1"
+                      x:Name="cb_t_assembly" Margin="0,4,0,0"
+                      IsEditable="False"/>
+        </Grid>
+
+        <TextBlock Grid.Row="9" Grid.Column="0"
                    Text="Wall Base:" VerticalAlignment="Center" Margin="0,8"/>
-        <CheckBox Grid.Row="8" Grid.Column="1"
+        <CheckBox Grid.Row="9" Grid.Column="1"
                   x:Name="chk_support_top"
                   Content="Use selected floor top as wall base"
                   Margin="0,8"/>
 
-        <TextBlock Grid.Row="9" Grid.Column="0"
+        <TextBlock Grid.Row="10" Grid.Column="0"
                    Text="Replace:" VerticalAlignment="Top" Margin="0,8"
                    Visibility="Collapsed"/>
-        <CheckBox Grid.Row="9" Grid.Column="1"
+        <CheckBox Grid.Row="10" Grid.Column="1"
                   x:Name="chk_clean_existing"
                   IsChecked="True"
                   Margin="0,8"
@@ -110,12 +134,12 @@
                        TextWrapping="Wrap"/>
         </CheckBox>
 
-        <TextBlock Grid.Row="10" Grid.ColumnSpan="2"
+        <TextBlock Grid.Row="11" Grid.ColumnSpan="2"
                    x:Name="tb_summary" Margin="0,8"
                    TextWrapping="Wrap" FontStyle="Italic"
                    Foreground="Gray"/>
 
-        <StackPanel Grid.Row="12" Grid.ColumnSpan="2"
+        <StackPanel Grid.Row="13" Grid.ColumnSpan="2"
                     Orientation="Horizontal" HorizontalAlignment="Right"
                     Margin="0,8,0,0">
             <Button x:Name="btn_ok" Content="Frame"

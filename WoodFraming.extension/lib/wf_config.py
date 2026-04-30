@@ -26,6 +26,12 @@ LAYER_MODE_THICKEST = "thickest"
 WALL_BASE_MODE_WALL = "wall_base"
 WALL_BASE_MODE_SUPPORT_TOP = "support_top"
 
+# Wall join assembly styles
+WALL_JOIN_CORNER_INSULATED = "corner_insulated"
+WALL_JOIN_CORNER_CAVITY = "corner_cavity"
+WALL_JOIN_T_ASSEMBLY = "t_assembly"
+WALL_JOIN_T_BLOCKING_NAILER = "t_blocking_nailer"
+
 # Ceiling framing controls
 CEILING_DIRECTION_AUTO = "auto"
 CEILING_DIRECTION_X = "x_axis"
@@ -79,6 +85,8 @@ class FramingConfig(object):
 
         # General options
         self.include_corner_studs = True
+        self.wall_join_corner_style = WALL_JOIN_CORNER_INSULATED
+        self.wall_join_t_style = WALL_JOIN_T_ASSEMBLY
         self.include_cripple_studs = True
         self.include_king_studs = True
         self.include_jack_studs = True
@@ -134,6 +142,8 @@ class FramingConfig(object):
             "sill_plate_family_name": self.sill_plate_family_name,
             "sill_plate_type_name": self.sill_plate_type_name,
             "include_corner_studs": self.include_corner_studs,
+            "wall_join_corner_style": self.wall_join_corner_style,
+            "wall_join_t_style": self.wall_join_t_style,
             "include_cripple_studs": self.include_cripple_studs,
             "include_king_studs": self.include_king_studs,
             "include_jack_studs": self.include_jack_studs,

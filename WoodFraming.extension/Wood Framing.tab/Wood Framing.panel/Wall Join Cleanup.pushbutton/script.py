@@ -293,7 +293,7 @@ def main():
         "- **Join type:** {0}\n"
         "- **Assembly:** {1}\n"
         "- **Angle:** {2:.1f} degrees\n"
-        "- **Generated stud/blocking members removed near join:** {3}\n"
+        "- **Previous join assembly members replaced:** {3}\n"
         "- **Assembly members requested:** {4}\n"
         "- **Assembly members placed:** {5}\n"
         "{6}".format(

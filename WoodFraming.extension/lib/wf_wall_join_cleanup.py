@@ -30,10 +30,6 @@ ANGLE_DOT_TOL = 0.25
 DEFAULT_DELETE_RADIUS = inches_to_feet(24.0)
 
 DELETE_MEMBER_ROLES = set([
-    "STUD",
-    "SIDE_STUD",
-    "BLOCKING",
-    "MID_PLATE",
     "CORNER_STUD",
     "CORNER_BACKING_STUD",
     "CORNER_RETURN_STUD",
@@ -45,7 +41,7 @@ DELETE_MEMBER_ROLES = set([
     "T_BLOCKING",
 ])
 
-DELETE_TRACKING_KINDS = set(["wall", "wall_v2", "wall_v4", "wall_join"])
+DELETE_TRACKING_KINDS = set(["wall_join"])
 
 
 class WallJoinCleanupError(Exception):
@@ -82,6 +78,15 @@ class WallJoinCleanupResult(object):
         self.warnings = []
 
 
+class WallJoinAssemblyPlan(object):
+    def __init__(self):
+        self.join_kind = None
+        self.style_key = None
+        self.angle_degrees = 0.0
+        self.hosts = []
+        self.members = []
+
+
 def analyze_wall_join(doc, walls, config):
     """Analyze the two selected walls and return their join relationship."""
     if walls is None or len(walls) != 2:
@@ -95,7 +100,7 @@ def analyze_wall_join(doc, walls, config):
 
 
 def cleanup_selected_wall_join(doc, walls, config, style_key, delete_radius=None):
-    """Remove generated join-area studs/blocking and place a chosen assembly."""
+    """Replace previous join assembly members and place a chosen assembly."""
     if delete_radius is None:
         delete_radius = DEFAULT_DELETE_RADIUS
 
@@ -141,6 +146,161 @@ def cleanup_selected_wall_join(doc, walls, config, style_key, delete_radius=None
                 result.skipped_count
             )
         )
+    return result
+
+
+def build_wall_join_assembly_plans(doc, walls, config, corner_style_key,
+                                   t_style_key, detection_hosts=None):
+    """Build join assemblies for selected walls without deleting wall studs.
+
+    Selected walls are paired with other walls in the document so rerunning
+    Wall Framing for one wall can recreate that wall's side of a prior join
+    assembly. Members owned by unselected walls are not returned.
+    """
+    if walls is None or len(walls) < 1:
+        return []
+
+    target_ids = set()
+    for wall in walls:
+        wall_id = _element_id_text(getattr(wall, "Id", None))
+        if wall_id:
+            target_ids.add(wall_id)
+    if not target_ids:
+        return []
+
+    engine = WallCavityFramingV4Engine(doc, config)
+    context_walls = _join_context_walls(walls)
+    if detection_hosts is None:
+        detection_hosts = _analyze_host_map(engine, context_walls, False)
+    placement_hosts = {}
+
+    plans = []
+    seen_pairs = set()
+    seen_members = set()
+
+    for wall in walls:
+        wall_id = _element_id_text(getattr(wall, "Id", None))
+        if wall_id is None or wall_id not in detection_hosts:
+            continue
+
+        host_a = detection_hosts.get(wall_id)
+        for other in context_walls:
+            other_id = _element_id_text(getattr(other, "Id", None))
+            if other_id is None or other_id == wall_id:
+                continue
+            pair_key = tuple(sorted([wall_id, other_id]))
+            if pair_key in seen_pairs:
+                continue
+            seen_pairs.add(pair_key)
+
+            host_b = detection_hosts.get(other_id)
+            if host_b is None:
+                continue
+
+            try:
+                detection_relation = _classify_hosts(host_a, host_b)
+            except WallJoinCleanupError:
+                continue
+
+            style_key = None
+            if detection_relation.kind == JOIN_KIND_CORNER:
+                style_key = corner_style_key
+            elif detection_relation.kind == JOIN_KIND_T:
+                style_key = t_style_key
+            if not style_key:
+                continue
+
+            raw_a = _raw_host_for_wall(engine, wall, placement_hosts)
+            raw_b = _raw_host_for_wall(engine, other, placement_hosts)
+            if raw_a is None or raw_b is None:
+                continue
+
+            detection_relation.hosts = [host_a, host_b]
+            try:
+                relation = _rebind_relation_to_hosts(
+                    detection_relation,
+                    [raw_a, raw_b],
+                )
+                members = _build_join_members(engine, relation, style_key)
+            except WallJoinCleanupError:
+                continue
+
+            selected_members = []
+            for member in _dedupe_members(members):
+                member_host_id = _element_id_text(getattr(member, "host_id", None))
+                if member_host_id not in target_ids:
+                    continue
+                member_key = _member_key(member)
+                if member_key in seen_members:
+                    continue
+                seen_members.add(member_key)
+                selected_members.append(member)
+            if not selected_members:
+                continue
+
+            plan = WallJoinAssemblyPlan()
+            plan.join_kind = relation.kind
+            plan.style_key = style_key
+            plan.angle_degrees = relation.angle_degrees
+            plan.hosts = [
+                host for host in (raw_a, raw_b)
+                if _element_id_text(getattr(host, "element_id", None)) in target_ids
+            ]
+            plan.members = selected_members
+            plans.append(plan)
+
+    return plans
+
+
+def _join_context_walls(selected_walls):
+    result = []
+    seen = set()
+
+    def add_wall(wall):
+        wall_id = _element_id_text(getattr(wall, "Id", None))
+        if wall is None or wall_id is None or wall_id in seen:
+            return
+        seen.add(wall_id)
+        result.append(wall)
+
+    for wall in selected_walls or []:
+        add_wall(wall)
+    return result
+
+
+def _raw_host_for_wall(engine, wall, host_map):
+    wall_id = _element_id_text(getattr(wall, "Id", None))
+    if wall_id is None:
+        return None
+    if wall_id in host_map:
+        return host_map.get(wall_id)
+    try:
+        host = engine._analyze_wall(wall, use_raw_face_domain=True)
+    except Exception:
+        host = None
+    if host is not None:
+        host.kind = "wall_join"
+    host_map[wall_id] = host
+    return host
+
+
+def _analyze_host_map(engine, walls, use_raw_face_domain):
+    result = {}
+    for wall in walls or []:
+        wall_id = _element_id_text(getattr(wall, "Id", None))
+        if wall_id is None:
+            continue
+        try:
+            host = engine._analyze_wall(
+                wall,
+                use_raw_face_domain=use_raw_face_domain,
+            )
+        except Exception:
+            host = None
+        if host is None:
+            continue
+        host.kind = "wall_join"
+        result[wall_id] = host
     return result
 
 
@@ -340,17 +500,42 @@ def _t_members(engine, relation, style_key):
     branch_d = _end_stud_d(branch, relation.branch_end, main, relation.point)
     _add_required_edge_stud(engine, members, branch, "T_BRANCH_STUD", branch_d)
 
+    branch_backing_d = _inboard_stud_d(
+        branch,
+        relation.branch_end,
+        branch_d,
+        1,
+    )
+
     if style_key == STYLE_T_ASSEMBLY:
         offset = _t_backing_offset(branch)
-        _add_vertical_member(engine, members, main, "T_BACKING_STUD", main_d - offset, False)
-        _add_vertical_member(engine, members, main, "T_BACKING_STUD", main_d + offset, False)
-    else:
-        branch_backing_d = _inboard_stud_d(
+        _add_vertical_member(
+            engine,
+            members,
             branch,
-            relation.branch_end,
-            branch_d,
-            1,
+            "T_BRANCH_BACKING_STUD",
+            branch_backing_d,
+            False,
         )
+        _add_offset_vertical_member(
+            engine,
+            members,
+            main,
+            "T_BACKING_STUD",
+            main_d,
+            -1.0,
+            offset,
+        )
+        _add_offset_vertical_member(
+            engine,
+            members,
+            main,
+            "T_BACKING_STUD",
+            main_d,
+            1.0,
+            offset,
+        )
+    else:
         _add_vertical_member(
             engine,
             members,
@@ -375,6 +560,27 @@ def _t_members(engine, relation, style_key):
     return members
 
 
+def _add_offset_vertical_member(engine, members, host, role, center_d, side_sign,
+                                offset):
+    side_sign = -1.0 if side_sign < 0.0 else 1.0
+    offset = max(STUD_THICKNESS, float(offset or STUD_THICKNESS))
+    distances = [
+        offset,
+        offset + STUD_THICKNESS,
+        offset + STUD_THICKNESS * 2.0,
+        max(STUD_THICKNESS * 0.5, offset - STUD_THICKNESS * 0.5),
+    ]
+    for distance in distances:
+        d = center_d + side_sign * distance
+        if not _valid_stud_center_d(host, d):
+            continue
+        if _has_vertical_member_near(members, host, d, STUD_THICKNESS * 0.5):
+            continue
+        if _add_vertical_member(engine, members, host, role, d, False):
+            return True
+    return False
+
+
 def _add_vertical_member(engine, members, host, role, d, is_side):
     d = _clamp_d(host, d)
     validation_role = "SIDE_STUD" if is_side else "STUD"
@@ -392,6 +598,41 @@ def _add_required_edge_stud(engine, members, host, role, d):
     if _add_vertical_member(engine, members, host, role, d, True):
         return True
     return _add_vertical_member(engine, members, host, role, d, False)
+
+
+def _valid_stud_center_d(host, d):
+    if d is None:
+        return False
+    try:
+        d = float(d)
+    except Exception:
+        return False
+    return STUD_THICKNESS * 0.5 <= d <= host.length - STUD_THICKNESS * 0.5
+
+
+def _has_vertical_member_near(members, host, d, tolerance):
+    host_id = _element_id_text(getattr(host, "element_id", None))
+    for member in members:
+        if not getattr(member, "is_column", False):
+            continue
+        if _element_id_text(getattr(member, "host_id", None)) != host_id:
+            continue
+        current_d = _member_distance_on_host(host, member)
+        if current_d is None:
+            continue
+        if abs(current_d - d) <= tolerance:
+            return True
+    return False
+
+
+def _member_distance_on_host(host, member):
+    point = getattr(member, "start_point", None)
+    if point is None:
+        return None
+    try:
+        return _projection_distance(host, point)
+    except Exception:
+        return None
 
 
 def _add_blocking_between(engine, members, host, d0, d1, role):
@@ -620,17 +861,21 @@ def _dedupe_members(members):
     result = []
     seen = set()
     for member in members:
-        key = (
-            _element_id_text(getattr(member, "host_id", None)),
-            getattr(member, "member_type", ""),
-            _point_key(getattr(member, "start_point", None)),
-            _point_key(getattr(member, "end_point", None)),
-        )
+        key = _member_key(member)
         if key in seen:
             continue
         seen.add(key)
         result.append(member)
     return result
+
+
+def _member_key(member):
+    return (
+        _element_id_text(getattr(member, "host_id", None)),
+        getattr(member, "member_type", ""),
+        _point_key(getattr(member, "start_point", None)),
+        _point_key(getattr(member, "end_point", None)),
+    )
 
 
 def _point_key(point):

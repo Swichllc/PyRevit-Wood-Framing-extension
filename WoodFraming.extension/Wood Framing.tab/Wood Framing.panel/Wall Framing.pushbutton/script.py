@@ -24,6 +24,8 @@ from wf_config import (
     FramingConfig,
     SPACING_16OC,
     SPACING_24OC,
+    WALL_JOIN_CORNER_INSULATED,
+    WALL_JOIN_T_ASSEMBLY,
     WALL_BASE_MODE_SUPPORT_TOP,
     WALL_BASE_MODE_WALL,
 )
@@ -33,7 +35,16 @@ from wf_families import (
     parse_family_type_label,
 )
 from wf_tracking import get_tracking_data
-from wf_wall_framing_v4 import ENGINE_NAME, WallCavityFramingV4Engine
+from wf_wall_framing_v4 import ENGINE_NAME, STUD_THICKNESS, WallCavityFramingV4Engine
+from wf_wall_join_cleanup import (
+    JOIN_KIND_CORNER,
+    JOIN_KIND_T,
+    STYLE_CORNER_CAVITY,
+    STYLE_CORNER_INSULATED,
+    STYLE_T_ASSEMBLY,
+    STYLE_T_BLOCKING_NAILER,
+    build_wall_join_assembly_plans,
+)
 
 
 logger = script.get_logger()
@@ -46,6 +57,16 @@ _CFG_PATH = os.path.join(
     "WoodFraming_Wall20LastConfig.json",
 )
 
+CORNER_STYLE_LABELS = [
+    ("Insulated corner - two studs", STYLE_CORNER_INSULATED),
+    ("Cavity corner - two studs plus blocking", STYLE_CORNER_CAVITY),
+]
+T_STYLE_LABELS = [
+    ("T assembly", STYLE_T_ASSEMBLY),
+    ("Blocking and 1x nailer", STYLE_T_BLOCKING_NAILER),
+]
+JOIN_CONFLICT_MEMBER_TYPES = set(["SIDE_STUD", "STUD"])
+
 
 class WallFraming20Dialog(WPFWindow):
     def __init__(self, column_types, framing_types, wall_count):
@@ -57,12 +78,22 @@ class WallFraming20Dialog(WPFWindow):
         self.cb_stud_type.ItemsSource = column_types
         self.cb_plate_type.ItemsSource = framing_types
         self.cb_header_type.ItemsSource = framing_types
+        self.cb_corner_assembly.ItemsSource = [
+            label for label, _key in CORNER_STYLE_LABELS
+        ]
+        self.cb_t_assembly.ItemsSource = [
+            label for label, _key in T_STYLE_LABELS
+        ]
 
         if column_types:
             self.cb_stud_type.SelectedIndex = 0
         if framing_types:
             self.cb_plate_type.SelectedIndex = 0
             self.cb_header_type.SelectedIndex = 0
+        if CORNER_STYLE_LABELS:
+            self.cb_corner_assembly.SelectedIndex = 0
+        if T_STYLE_LABELS:
+            self.cb_t_assembly.SelectedIndex = 0
 
         self.tb_summary.Text = (
             "Frame {0} selected wall(s)."
@@ -152,6 +183,16 @@ class WallFraming20Dialog(WPFWindow):
             else WALL_BASE_MODE_WALL
         )
         config.clean_existing_wall_members = bool(self.chk_clean_existing.IsChecked)
+        config.wall_join_corner_style = _selected_style_key(
+            self.cb_corner_assembly,
+            CORNER_STYLE_LABELS,
+            WALL_JOIN_CORNER_INSULATED,
+        )
+        config.wall_join_t_style = _selected_style_key(
+            self.cb_t_assembly,
+            T_STYLE_LABELS,
+            WALL_JOIN_T_ASSEMBLY,
+        )
         config.track_members = True
         return config
 
@@ -172,6 +213,8 @@ class WallFraming20Dialog(WPFWindow):
             "cripple": bool(self.chk_cripple_studs.IsChecked),
             "support_top": bool(self.chk_support_top.IsChecked),
             "clean_existing": bool(self.chk_clean_existing.IsChecked),
+            "corner_assembly": str(self.cb_corner_assembly.SelectedItem or ""),
+            "t_assembly": str(self.cb_t_assembly.SelectedItem or ""),
         }
         try:
             cfg_dir = os.path.dirname(_CFG_PATH)
@@ -213,6 +256,8 @@ class WallFraming20Dialog(WPFWindow):
         self.chk_cripple_studs.IsChecked = bool(data.get("cripple", True))
         self.chk_support_top.IsChecked = bool(data.get("support_top", False))
         self.chk_clean_existing.IsChecked = True
+        self._select_if_present(self.cb_corner_assembly, data.get("corner_assembly"))
+        self._select_if_present(self.cb_t_assembly, data.get("t_assembly"))
 
     @staticmethod
     def _select_if_present(combo, value):
@@ -251,6 +296,29 @@ class _WallSupportFilter(ISelectionFilter):
         return False
 
 
+def _selected_style_key(combo, style_pairs, fallback):
+    selected = str(getattr(combo, "SelectedItem", "") or "")
+    for label, key in style_pairs:
+        if selected == label:
+            return key
+    return fallback
+
+
+def _style_label(style_key):
+    for label, key in CORNER_STYLE_LABELS + T_STYLE_LABELS:
+        if key == style_key:
+            return label
+    return style_key or ""
+
+
+def _join_label(join_kind):
+    if join_kind == JOIN_KIND_CORNER:
+        return "Corner"
+    if join_kind == JOIN_KIND_T:
+        return "T intersection"
+    return join_kind or ""
+
+
 def _pick_support(doc):
     try:
         ref = revit.uidoc.Selection.PickObject(
@@ -286,7 +354,9 @@ def _delete_existing_wall_members(doc, walls, include_legacy):
     if not wall_ids:
         return {"wall_v4": 0, "wall_v2": 0, "wall": 0, "wall_join": 0}
 
-    allowed_kinds = set(["wall_v4", "wall_v2", "wall_join"])
+    allowed_kinds = set(["wall_v4", "wall_v2"])
+    if len(wall_ids) >= 2:
+        allowed_kinds.add("wall_join")
     if include_legacy:
         allowed_kinds.add("wall")
 
@@ -404,6 +474,152 @@ def _element_id_text(element_id):
     return str(value)
 
 
+class _WallFrameStage(object):
+    def __init__(self, wall, host, members, occupied):
+        self.wall = wall
+        self.host = host
+        self.members = members
+        self.occupied = occupied
+
+
+def _calculate_wall_stage(engine, wall):
+    host = engine._analyze_wall(wall)
+    if host is None:
+        return None
+    occupied = set()
+    members = []
+    members.extend(engine._wall_shape_members(host, occupied))
+    members.extend(engine._opening_members(host, occupied))
+    return _WallFrameStage(wall, host, members, occupied)
+
+
+def _finish_wall_stage(engine, stage, join_members):
+    _mark_join_members_occupied(stage.host, stage.occupied, join_members)
+    stage.members, skipped = _filter_join_conflicts(
+        stage.host,
+        stage.members,
+        join_members,
+    )
+    stage.members.extend(engine._infill_members(stage.host, stage.occupied))
+    return skipped
+
+
+def _join_members_by_host_id(join_plans):
+    result = {}
+    for plan in join_plans or []:
+        for member in getattr(plan, "members", []) or []:
+            host_id = _element_id_text(getattr(member, "host_id", None))
+            if host_id is None:
+                continue
+            result.setdefault(host_id, []).append(member)
+    return result
+
+
+def _stage_host_map(stages):
+    result = {}
+    for stage in stages or []:
+        host = getattr(stage, "host", None)
+        host_id = _element_id_text(getattr(host, "element_id", None))
+        if host_id is not None:
+            result[host_id] = host
+    return result
+
+
+def _mark_join_members_occupied(host, occupied, join_members):
+    for member in join_members or []:
+        if not getattr(member, "is_column", False):
+            continue
+        d = _member_distance_on_host(host, member)
+        if d is None:
+            continue
+        if d < -STUD_THICKNESS or d > host.length + STUD_THICKNESS:
+            continue
+        occupied.add(round(max(0.0, min(host.length, d)), 4))
+
+
+def _filter_join_conflicts(host, members, join_members):
+    join_distances = []
+    for join_member in join_members or []:
+        if not getattr(join_member, "is_column", False):
+            continue
+        d = _member_distance_on_host(host, join_member)
+        if d is not None:
+            join_distances.append(d)
+    if not join_distances:
+        return members, 0
+
+    kept = []
+    skipped = 0
+    for member in members:
+        member_type = str(getattr(member, "member_type", "") or "").upper()
+        if (member_type not in JOIN_CONFLICT_MEMBER_TYPES
+                or not getattr(member, "is_column", False)):
+            kept.append(member)
+            continue
+        d = _member_distance_on_host(host, member)
+        if d is None:
+            kept.append(member)
+            continue
+        if _near_any_distance(d, join_distances, STUD_THICKNESS * 0.75):
+            skipped += 1
+            continue
+        kept.append(member)
+    return kept, skipped
+
+
+def _member_distance_on_host(host, member):
+    point = getattr(member, "start_point", None)
+    if point is None:
+        return None
+    try:
+        vec = point - host.start_point
+        return vec.DotProduct(host.direction)
+    except Exception:
+        return None
+
+
+def _near_any_distance(value, distances, tolerance):
+    for distance in distances:
+        if abs(value - distance) <= tolerance:
+            return True
+    return False
+
+
+def _place_join_plans(engine, join_plans):
+    placed_count = 0
+    for plan in join_plans or []:
+        for host in getattr(plan, "hosts", []) or []:
+            host_id = _element_id_text(getattr(host, "element_id", None))
+            host_members = [
+                member for member in getattr(plan, "members", []) or []
+                if _element_id_text(getattr(member, "host_id", None)) == host_id
+            ]
+            if not host_members:
+                continue
+            placed_count += len(engine.place_members(host_members, host))
+    return placed_count
+
+
+def _join_audit_table(join_plans):
+    table = (
+        "\n### Join Assembly Audit\n"
+        "| Join | Assembly | Members |\n"
+        "| --- | --- | ---: |\n"
+    )
+    if not join_plans:
+        return table + "| None detected | | 0 |\n"
+    for plan in join_plans:
+        table += (
+            "| {0} | {1} | {2} |\n"
+            .format(
+                _join_label(getattr(plan, "join_kind", None)),
+                _style_label(getattr(plan, "style_key", None)),
+                len(getattr(plan, "members", []) or []),
+            )
+        )
+    return table
+
+
 def main():
     doc = revit.doc
 
@@ -450,6 +666,10 @@ def main():
     skipped = 0
     deleted_counts = {"wall_v4": 0, "wall_v2": 0, "wall": 0, "wall_join": 0}
     audit_rows = []
+    join_plans = []
+    join_requested = 0
+    join_placed = 0
+    join_conflict_skipped = 0
 
     with revit.Transaction("WF: Wall Framing"):
         deleted_counts = _delete_existing_wall_members(
@@ -457,15 +677,44 @@ def main():
             walls,
             bool(getattr(config, "clean_existing_wall_members", True)),
         )
+
+        stages = []
         for wall in walls:
-            members, host = engine.calculate_members(wall)
-            if host is None:
+            stage = _calculate_wall_stage(engine, wall)
+            if stage is None:
                 skipped += 1
                 continue
-            placed = engine.place_members(members, host)
+            stages.append(stage)
+
+        join_plans = build_wall_join_assembly_plans(
+            doc,
+            [stage.wall for stage in stages],
+            config,
+            getattr(config, "wall_join_corner_style", STYLE_CORNER_INSULATED),
+            getattr(config, "wall_join_t_style", STYLE_T_ASSEMBLY),
+            _stage_host_map(stages),
+        )
+        join_requested = sum(
+            len(getattr(plan, "members", []) or [])
+            for plan in join_plans
+        )
+        join_members_by_host = _join_members_by_host_id(join_plans)
+
+        for stage in stages:
+            host_id = _element_id_text(getattr(stage.host, "element_id", None))
+            host_join_members = join_members_by_host.get(host_id, [])
+            join_conflict_skipped += _finish_wall_stage(
+                engine,
+                stage,
+                host_join_members,
+            )
+            placed = engine.place_members(stage.members, stage.host)
             wall_count += 1
             member_count += len(placed)
-            audit_rows.append((getattr(host, "audit", {}), len(placed)))
+            audit_rows.append((getattr(stage.host, "audit", {}), len(placed)))
+
+        join_placed = _place_join_plans(engine, join_plans)
+        member_count += join_placed
 
     audit_table = (
         "\n### Source Geometry Audit\n"
@@ -483,6 +732,8 @@ def main():
     for audit, _placed_count in audit_rows:
         side_stud_table += _side_stud_audit_line(audit)
 
+    join_table = _join_audit_table(join_plans)
+
     deleted_total = (
         deleted_counts.get("wall_v4", 0)
         + deleted_counts.get("wall_v2", 0)
@@ -497,15 +748,25 @@ def main():
         "- **Walls skipped:** {2}\n"
         "- **Previous members replaced:** {3}\n"
         "- **Members placed:** {4}\n"
-        "{5}"
-        "{6}".format(
+        "- **Join assemblies detected:** {5}\n"
+        "- **Join assembly members requested:** {6}\n"
+        "- **Join assembly members placed:** {7}\n"
+        "- **Base side studs skipped for join assemblies:** {8}\n"
+        "{9}"
+        "{10}"
+        "{11}".format(
             ENGINE_NAME,
             wall_count,
             skipped,
             deleted_total,
             member_count,
+            len(join_plans),
+            join_requested,
+            join_placed,
+            join_conflict_skipped,
             audit_table,
             side_stud_table,
+            join_table,
         )
     )
 
