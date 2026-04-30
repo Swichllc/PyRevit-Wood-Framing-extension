@@ -28,6 +28,7 @@ These are the active pyRevit button titles currently defined by the enabled `*.p
 | Tool name in Revit | Bundle folder |
 | --- | --- |
 | `Wall Framing` | `Wall Framing.pushbutton` |
+| `Wall Join Cleanup` | `Wall Join Cleanup.pushbutton` |
 | `Floor Framing` | `Frame Floor.pushbutton` |
 | `Ceiling Framing` | `Frame Ceiling.pushbutton` |
 | `Single-Slope Roof Framing` | `Frame Roof.pushbutton` |
