@@ -284,9 +284,9 @@ def _delete_existing_wall_members(doc, walls, include_legacy):
         if wall_id:
             wall_ids.add(wall_id)
     if not wall_ids:
-        return {"wall_v4": 0, "wall_v2": 0, "wall": 0}
+        return {"wall_v4": 0, "wall_v2": 0, "wall": 0, "wall_join": 0}
 
-    allowed_kinds = set(["wall_v4", "wall_v2"])
+    allowed_kinds = set(["wall_v4", "wall_v2", "wall_join"])
     if include_legacy:
         allowed_kinds.add("wall")
 
@@ -313,7 +313,7 @@ def _delete_existing_wall_members(doc, walls, include_legacy):
             if tracking.get("host") in wall_ids:
                 delete_items.append((element.Id, kind))
 
-    deleted = {"wall_v4": 0, "wall_v2": 0, "wall": 0}
+    deleted = {"wall_v4": 0, "wall_v2": 0, "wall": 0, "wall_join": 0}
     for element_id, kind in delete_items:
         try:
             doc.Delete(element_id)
@@ -448,7 +448,7 @@ def main():
     wall_count = 0
     member_count = 0
     skipped = 0
-    deleted_counts = {"wall_v4": 0, "wall_v2": 0, "wall": 0}
+    deleted_counts = {"wall_v4": 0, "wall_v2": 0, "wall": 0, "wall_join": 0}
     audit_rows = []
 
     with revit.Transaction("WF: Wall Framing"):
@@ -487,6 +487,7 @@ def main():
         deleted_counts.get("wall_v4", 0)
         + deleted_counts.get("wall_v2", 0)
         + deleted_counts.get("wall", 0)
+        + deleted_counts.get("wall_join", 0)
     )
 
     output.print_md(

@@ -106,6 +106,11 @@ class WallCavityHostInfoV4(object):
         self.openings = []
         self.perimeter_segments = []
         self.wall_solids = []
+        self.raw_domain_start = 0.0
+        self.raw_domain_end = 0.0
+        self.domain_start = 0.0
+        self.domain_end = 0.0
+        self.domain_source = ""
         self.audit = {}
         self.rejections = []
 
@@ -145,7 +150,7 @@ class WallCavityFramingV4Engine(BaseFramingEngine):
     # Analysis
     # ------------------------------------------------------------------
 
-    def _analyze_wall(self, wall):
+    def _analyze_wall(self, wall, use_raw_face_domain=False):
         from Autodesk.Revit.DB import BuiltInParameter, Line, XYZ
 
         loc = getattr(wall, "Location", None)
@@ -199,11 +204,16 @@ class WallCavityFramingV4Engine(BaseFramingEngine):
         raw_outer = loops2[outer_index]
         raw_start_d = min(d for d, _ in raw_outer)
         raw_end_d = max(d for d, _ in raw_outer)
-        start_d, end_d, domain_source = _trim_domain_to_location_curve(
-            raw_start_d,
-            raw_end_d,
-            curve.Length,
-        )
+        if use_raw_face_domain:
+            start_d = raw_start_d
+            end_d = raw_end_d
+            domain_source = "raw_face"
+        else:
+            start_d, end_d, domain_source = _trim_domain_to_location_curve(
+                raw_start_d,
+                raw_end_d,
+                curve.Length,
+            )
         trimmed_loops2 = _clip_loops_to_d_domain(loops2, start_d, end_d)
         outer_index = _largest_loop_index(trimmed_loops2)
         if outer_index is None:
@@ -298,6 +308,11 @@ class WallCavityFramingV4Engine(BaseFramingEngine):
         host.openings = openings
         host.perimeter_segments = perimeter_segments
         host.wall_solids = wall_solids
+        host.raw_domain_start = raw_start_d
+        host.raw_domain_end = raw_end_d
+        host.domain_start = start_d
+        host.domain_end = end_d
+        host.domain_source = domain_source
         host.audit = {
             "wall_id": _element_id_text(wall.Id),
             "location_length": curve.Length,
